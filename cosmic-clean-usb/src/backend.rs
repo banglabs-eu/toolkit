@@ -162,7 +162,7 @@ fn verify_integrity(mount_point: &str) -> String {
     let test_file = format!("{mount_point}/.cleanusb_verify");
 
     let _ = Command::new("dd")
-        .args(["if=/dev/urandom", &format!("of={test_file}"), "bs=1M", "count=16", "status=none"])
+        .args(["if=/dev/urandom", &format!("of={test_file}"), "bs=1M", "count=4", "status=none"])
         .status();
     let _ = Command::new("sync").status();
 
@@ -183,14 +183,14 @@ fn benchmark(mount_point: &str) -> (String, String) {
     let test_file = format!("{mount_point}/.cleanusb_benchmark");
 
     let write_output = Command::new("dd")
-        .args(["if=/dev/zero", &format!("of={test_file}"), "bs=1M", "count=64", "conv=fsync"])
+        .args(["if=/dev/zero", &format!("of={test_file}"), "bs=1M", "count=16", "conv=fsync"])
         .output();
     let write_speed = parse_dd_speed(write_output);
 
     let _ = std::fs::write("/proc/sys/vm/drop_caches", "3");
 
     let read_output = Command::new("dd")
-        .args([&format!("if={test_file}"), "of=/dev/null", "bs=1M", "count=64"])
+        .args([&format!("if={test_file}"), "of=/dev/null", "bs=1M", "count=16"])
         .output();
     let read_speed = parse_dd_speed(read_output);
 
