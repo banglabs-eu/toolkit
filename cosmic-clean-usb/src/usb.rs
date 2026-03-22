@@ -44,32 +44,32 @@ pub enum WipeMode {
 /// Discover all USB block devices (no root needed).
 pub fn detect_devices() -> Vec<UsbDevice> {
     let output = match Command::new("lsblk")
-        .args(["-dnpo", "NAME,TRAN,TYPE,SIZE,MODEL"])
+        .args(["-Jdnpo", "NAME,TRAN,TYPE,SIZE,MODEL"])
         .output()
     {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(o) => o.stdout,
+        Err(_) => return Vec::new(),
+    };
+
+    let json: serde_json::Value = match serde_json::from_slice(&output) {
+        Ok(v) => v,
         Err(_) => return Vec::new(),
     };
 
     let mut devices = Vec::new();
-    for line in output.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
+    if let Some(devs) = json["blockdevices"].as_array() {
+        for dev in devs {
+            let tran = dev["tran"].as_str().unwrap_or("");
+            let dtype = dev["type"].as_str().unwrap_or("");
+            if tran != "usb" || dtype != "disk" { continue; }
 
-        if parts.len() >= 3 && parts[1] == "usb" && parts[2] == "disk" {
-            let path = parts[0].to_string();
-            let size = parts.get(3).unwrap_or(&"").to_string();
-            // Model may contain spaces — join remaining fields
-            let model = if parts.len() > 4 {
-                parts[4..].join(" ")
-            } else {
-                "Unknown".to_string()
-            };
+            let path = dev["name"].as_str().unwrap_or("").to_string();
+            let size = dev["size"].as_str().unwrap_or("").to_string();
+            let model = dev["model"].as_str().unwrap_or("Unknown").to_string();
             let usb_version = get_usb_version(&path);
             let partitions = get_partitions(&path);
 
-            devices.push(UsbDevice {
-                path, model, size, usb_version, partitions,
-            });
+            devices.push(UsbDevice { path, model, size, usb_version, partitions });
         }
     }
     devices
@@ -77,28 +77,33 @@ pub fn detect_devices() -> Vec<UsbDevice> {
 
 fn get_partitions(device: &str) -> Vec<Partition> {
     let output = match Command::new("lsblk")
-        .args(["-npo", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT", device])
+        .args(["-Jpo", "NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT", device])
         .output()
     {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(o) => o.stdout,
+        Err(_) => return Vec::new(),
+    };
+
+    let json: serde_json::Value = match serde_json::from_slice(&output) {
+        Ok(v) => v,
         Err(_) => return Vec::new(),
     };
 
     let mut partitions = Vec::new();
-    for (i, line) in output.lines().enumerate() {
-        if i == 0 { continue; }
-        let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
-
-        let fields: Vec<&str> = trimmed.split_whitespace().collect();
-
-        partitions.push(Partition {
-            path: fields.first().unwrap_or(&"").to_string(),
-            size: fields.get(1).unwrap_or(&"").to_string(),
-            fstype: fields.get(2).unwrap_or(&"").to_string(),
-            label: fields.get(3).unwrap_or(&"").to_string(),
-            mountpoint: fields.get(4).map(|s| s.to_string()),
-        });
+    if let Some(devs) = json["blockdevices"].as_array() {
+        for dev in devs {
+            if let Some(children) = dev["children"].as_array() {
+                for child in children {
+                    partitions.push(Partition {
+                        path: child["name"].as_str().unwrap_or("").to_string(),
+                        size: child["size"].as_str().unwrap_or("").to_string(),
+                        fstype: child["fstype"].as_str().unwrap_or("").to_string(),
+                        label: child["label"].as_str().unwrap_or("").to_string(),
+                        mountpoint: child["mountpoint"].as_str().map(|s| s.to_string()),
+                    });
+                }
+            }
+        }
     }
     partitions
 }
