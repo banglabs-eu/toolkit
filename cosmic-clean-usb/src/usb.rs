@@ -134,16 +134,14 @@ fn get_usb_version(device: &str) -> String {
 }
 
 /// Resolve the binary path for pkexec invocation.
+/// Always uses the currently running binary so dev builds don't call stale installs.
 fn binary_for_pkexec() -> String {
-    // Prefer installed path (matches PolicyKit policy annotation)
-    let installed = "/usr/bin/cosmic-clean-usb";
-    if Path::new(installed).exists() {
-        return installed.to_string();
-    }
-    // Development: use current exe
     std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "cosmic-clean-usb".to_string())
+        .unwrap_or_else(|_| {
+            // Fallback to installed path
+            "/usr/bin/cosmic-clean-usb".to_string()
+        })
 }
 
 fn current_user() -> String {
@@ -194,23 +192,28 @@ pub fn wipe_device(device: &str, mode: WipeMode) -> Result<WipeResult, String> {
     };
     let user = current_user();
 
+    eprintln!("[cleanusb] pkexec {bin} --backend wipe {mode_arg} {device} {user}");
+
     let output = Command::new("pkexec")
         .args([&bin, "--backend", "wipe", mode_arg, device, &user])
         .output()
         .map_err(|e| format!("Failed to launch pkexec: {e}"))?;
 
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    eprintln!("[cleanusb] exit={}, stdout={}, stderr={}", output.status, stdout.trim(), stderr.trim());
+
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("dismissed") || stderr.contains("Not authorized") {
             return Err("Authentication cancelled".into());
         }
         return Err(format!("Wipe failed: {stderr}"));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let json_line = stdout.lines().last()
         .ok_or("No output from backend")?;
 
     serde_json::from_str::<WipeResult>(json_line)
-        .map_err(|e| format!("Failed to parse result: {e}"))
+        .map_err(|e| format!("Failed to parse result: {e}\nOutput: {stdout}"))
 }
