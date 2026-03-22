@@ -153,7 +153,10 @@ fn current_user() -> String {
 /// Mount via udisksctl (unprivileged for removable devices).
 pub fn mount_device(device: &str) -> Result<String, String> {
     let partitions = get_partitions(device);
-    let part = partitions.first().ok_or("No partitions found")?;
+    if partitions.is_empty() {
+        return Err("No partitions on this drive. Wipe it first to create a filesystem.".into());
+    }
+    let part = &partitions[0];
 
     if let Some(ref mp) = part.mountpoint {
         return Ok(mp.clone());
