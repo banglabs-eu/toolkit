@@ -1,5 +1,9 @@
+use std::time::Duration;
+
 use cosmic::app::{Core, Task};
+use cosmic::iced::time;
 use cosmic::iced::Length;
+use cosmic::iced::Subscription;
 use cosmic::widget;
 use cosmic::Application;
 use cosmic::Element;
@@ -27,6 +31,7 @@ pub enum Message {
     WipeFailed(String),
     BackToDevices,
     OpenMountPoint(String),
+    Tick,
 }
 
 pub struct CleanUsb {
@@ -138,6 +143,11 @@ impl Application for CleanUsb {
                 usb::open_in_browser(&path);
             }
 
+            Message::Tick => {
+                if let Some(ref mut progress) = self.wipe_in_progress {
+                    progress.elapsed_secs += 1;
+                }
+            }
         }
         Task::none()
     }
@@ -154,6 +164,14 @@ impl Application for CleanUsb {
             .height(Length::Fill)
             .padding(24)
             .into()
+    }
+
+    fn subscription(&self) -> Subscription<Self::Message> {
+        if self.wipe_in_progress.is_some() {
+            time::every(Duration::from_secs(1)).map(|_| Message::Tick)
+        } else {
+            Subscription::none()
+        }
     }
 }
 
