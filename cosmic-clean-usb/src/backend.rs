@@ -52,14 +52,32 @@ fn wipe(device: &str, mode: WipeMode, user: &str) -> Result<WipeResult, String> 
         WipeMode::Secure => "Secure wipe".to_string(),
     };
 
-    // Unmount all partitions
-    let parts_output = cmd_output("lsblk", &["-npo", "NAME,MOUNTPOINT", device])?;
-    for line in parts_output.lines().skip(1) {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() >= 2 {
-            let _ = Command::new("umount").arg(fields[0]).status();
+    // Unmount all partitions using JSON to handle spaces in mount points
+    let parts_json = cmd_output("lsblk", &["-Jpo", "NAME,MOUNTPOINT", device])?;
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&parts_json) {
+        if let Some(devs) = json["blockdevices"].as_array() {
+            for dev in devs {
+                // Unmount the device itself if mounted
+                if let Some(mp) = dev["mountpoint"].as_str() {
+                    let _ = Command::new("umount").arg(mp).status();
+                }
+                // Unmount children (partitions)
+                if let Some(children) = dev["children"].as_array() {
+                    for child in children {
+                        if let Some(mp) = child["mountpoint"].as_str() {
+                            let _ = Command::new("umount").arg(mp).status();
+                        }
+                        // Also unmount by device path as fallback
+                        if let Some(name) = child["name"].as_str() {
+                            let _ = Command::new("umount").arg(name).status();
+                        }
+                    }
+                }
+            }
         }
     }
+    // Give kernel time to release
+    std::thread::sleep(std::time::Duration::from_millis(500));
 
     // Wipe filesystem signatures
     cmd_run("wipefs", &["--all", "--force", device])?;
