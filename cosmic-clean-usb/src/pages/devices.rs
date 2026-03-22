@@ -69,22 +69,29 @@ fn device_card<'a>(device: &'a crate::usb::UsbDevice) -> Element<'a, Message> {
 
     // Partition details
     let mut parts_col = widget::column().spacing(2);
-    for part in &device.partitions {
-        let mp = part.mountpoint.as_deref().unwrap_or("not mounted");
+    if device.partitions.is_empty() {
         parts_col = parts_col.push(
-            widget::text::caption(format!(
-                "  {} — {} {} [{}] {}",
-                part.path, part.size, part.fstype, part.label, mp
-            ))
+            widget::text::caption("  No partitions — drive is blank. Quick Wipe to format.")
         );
+    } else {
+        for part in &device.partitions {
+            let mp = part.mountpoint.as_deref().unwrap_or("not mounted");
+            parts_col = parts_col.push(
+                widget::text::caption(format!(
+                    "  {} — {} {} [{}] {}",
+                    part.path, part.size, part.fstype, part.label, mp
+                ))
+            );
+        }
     }
 
     // Action buttons
     let quick_path = dev_path.clone();
     let secure_path = dev_path.clone();
     let open_path = dev_path.clone();
+    let has_partitions = !device.partitions.is_empty();
 
-    let actions = widget::row()
+    let mut actions = widget::row()
         .push(
             widget::button::suggested("Quick Wipe")
                 .on_press(Message::QuickWipe(quick_path)),
@@ -93,11 +100,14 @@ fn device_card<'a>(device: &'a crate::usb::UsbDevice) -> Element<'a, Message> {
             widget::button::destructive("Secure Wipe")
                 .on_press(Message::SecureWipe(secure_path)),
         )
-        .push(
+        .spacing(8);
+
+    if has_partitions {
+        actions = actions.push(
             widget::button::standard("Open")
                 .on_press(Message::OpenBrowser(open_path)),
-        )
-        .spacing(8);
+        );
+    }
 
     let card_content = widget::column()
         .push(info)
