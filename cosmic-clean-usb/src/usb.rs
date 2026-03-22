@@ -53,15 +53,17 @@ pub fn detect_devices() -> Vec<UsbDevice> {
 
     let mut devices = Vec::new();
     for line in output.lines() {
-        let parts: Vec<&str> = line.splitn(5, char::is_whitespace)
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let parts: Vec<&str> = line.split_whitespace().collect();
 
         if parts.len() >= 3 && parts[1] == "usb" && parts[2] == "disk" {
             let path = parts[0].to_string();
             let size = parts.get(3).unwrap_or(&"").to_string();
-            let model = parts.get(4).unwrap_or(&"Unknown").to_string();
+            // Model may contain spaces — join remaining fields
+            let model = if parts.len() > 4 {
+                parts[4..].join(" ")
+            } else {
+                "Unknown".to_string()
+            };
             let usb_version = get_usb_version(&path);
             let partitions = get_partitions(&path);
 
@@ -88,16 +90,14 @@ fn get_partitions(device: &str) -> Vec<Partition> {
         let trimmed = line.trim();
         if trimmed.is_empty() { continue; }
 
-        let fields: Vec<&str> = trimmed.splitn(5, char::is_whitespace)
-            .map(|s| s.trim())
-            .collect();
+        let fields: Vec<&str> = trimmed.split_whitespace().collect();
 
         partitions.push(Partition {
             path: fields.first().unwrap_or(&"").to_string(),
             size: fields.get(1).unwrap_or(&"").to_string(),
             fstype: fields.get(2).unwrap_or(&"").to_string(),
             label: fields.get(3).unwrap_or(&"").to_string(),
-            mountpoint: fields.get(4).map(|s| s.to_string()).filter(|s| !s.is_empty()),
+            mountpoint: fields.get(4).map(|s| s.to_string()),
         });
     }
     partitions
