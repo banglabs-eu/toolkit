@@ -1,0 +1,37 @@
+app_id := "com.banglabs.CleanUsb"
+bin_name := "cosmic-clean-usb"
+
+build:
+    cargo build --release
+
+build-debug:
+    cargo build
+
+run:
+    cargo run
+
+check:
+    cargo check
+
+clean:
+    cargo clean
+
+# Install system-wide (requires sudo). PolicyKit policy needs /usr/bin path.
+install: build
+    sudo install -Dm755 target/release/{{bin_name}} /usr/bin/{{bin_name}}
+    sudo install -Dm644 data/{{app_id}}.desktop /usr/share/applications/{{app_id}}.desktop
+    sudo install -Dm644 data/{{app_id}}.metainfo.xml /usr/share/metainfo/{{app_id}}.metainfo.xml
+    sudo install -Dm644 data/{{app_id}}.policy /usr/share/polkit-1/actions/{{app_id}}.policy
+    sudo install -Dm644 data/icons/hicolor/scalable/apps/{{app_id}}.svg /usr/share/icons/hicolor/scalable/apps/{{app_id}}.svg
+
+# Uninstall system-wide
+uninstall:
+    sudo rm -f /usr/bin/{{bin_name}}
+    sudo rm -f /usr/share/applications/{{app_id}}.desktop
+    sudo rm -f /usr/share/metainfo/{{app_id}}.metainfo.xml
+    sudo rm -f /usr/share/polkit-1/actions/{{app_id}}.policy
+    sudo rm -f /usr/share/icons/hicolor/scalable/apps/{{app_id}}.svg
+
+# Validate AppStream metadata
+validate-metainfo:
+    appstreamcli validate data/{{app_id}}.metainfo.xml

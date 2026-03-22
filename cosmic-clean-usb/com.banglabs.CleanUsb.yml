@@ -1,0 +1,40 @@
+app-id: com.banglabs.CleanUsb
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: cosmic-clean-usb
+
+# NOTE: This app requires host-level access for block device operations.
+# Native package (deb) installation is recommended over Flatpak.
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --device=all
+  - --share=ipc
+  - --system-talk-name=org.freedesktop.UDisks2
+  - --system-talk-name=org.freedesktop.PolicyKit1
+  - --filesystem=host
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/cosmic-clean-usb/cargo
+    CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
+modules:
+  - name: cosmic-clean-usb
+    buildsystem: simple
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml
+      - cargo --offline build --release
+      - install -Dm755 target/release/cosmic-clean-usb /app/bin/cosmic-clean-usb
+      - install -Dm644 data/com.banglabs.CleanUsb.desktop /app/share/applications/com.banglabs.CleanUsb.desktop
+      - install -Dm644 data/com.banglabs.CleanUsb.metainfo.xml /app/share/metainfo/com.banglabs.CleanUsb.metainfo.xml
+      - install -Dm644 data/com.banglabs.CleanUsb.policy /app/share/polkit-1/actions/com.banglabs.CleanUsb.policy
+      - install -Dm644 data/icons/hicolor/scalable/apps/com.banglabs.CleanUsb.svg /app/share/icons/hicolor/scalable/apps/com.banglabs.CleanUsb.svg
+    sources:
+      - type: dir
+        path: .

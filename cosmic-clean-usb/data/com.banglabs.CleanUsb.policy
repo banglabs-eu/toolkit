@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD polkit Policy Configuration 1.0//EN"
+    "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<policyconfig>
+  <vendor>Bang Labs</vendor>
+  <vendor_url>https://github.com/AdamBK/cosmic-clean-usb</vendor_url>
+
+  <action id="com.banglabs.CleanUsb.backend">
+    <description>Wipe and format a USB drive</description>
+    <message>Authentication is required to wipe a USB drive</message>
+    <icon_name>com.banglabs.CleanUsb</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/cosmic-clean-usb</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">false</annotate>
+  </action>
+</policyconfig>
