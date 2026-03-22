@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# clean-usb — Safely wipe and format attached USB drives for Windows use (exFAT + GPT).
+# Usage: sudo ./clean-usb [DEVICE]
+#   If DEVICE is omitted, lists detected USB drives and prompts for selection.
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+die()  { echo -e "${RED}Error: $*${RESET}" >&2; exit 1; }
+warn() { echo -e "${YELLOW}$*${RESET}"; }
+info() { echo -e "${GREEN}$*${RESET}"; }
+
+# --- Preflight checks ---
+
+[[ $EUID -eq 0 ]] || die "Must run as root. Use: sudo $0"
+
+for cmd in lsblk wipefs parted mkfs.exfat; do
+    command -v "$cmd" &>/dev/null || die "'$cmd' not found. Install with: sudo apt install parted exfatprogs"
+done
+
+# --- Discover USB block devices ---
+
+get_usb_devices() {
+    lsblk -dnpo NAME,TRAN,TYPE | awk '$2 == "usb" && $3 == "disk" { print $1 }'
+}
+
+# --- Select device ---
+
+if [[ -n "${1:-}" ]]; then
+    DEVICE="$1"
+    # Verify it's actually a USB device
+    TRAN=$(lsblk -dnpo TRAN "$DEVICE" 2>/dev/null) || die "$DEVICE does not exist"
+    [[ "$TRAN" == "usb" ]] || die "$DEVICE is not a USB device (transport: ${TRAN:-unknown}). Refusing to proceed."
+else
+    mapfile -t USB_DEVICES < <(get_usb_devices)
+
+    if [[ ${#USB_DEVICES[@]} -eq 0 ]]; then
+        die "No USB drives detected. Plug one in and try again."
+    fi
+
+    echo -e "${BOLD}Detected USB drives:${RESET}"
+    echo ""
+    for i in "${!USB_DEVICES[@]}"; do
+        dev="${USB_DEVICES[$i]}"
+        info_line=$(lsblk -dnpo NAME,SIZE,MODEL "$dev" | sed 's/  */ /g')
+        printf "  [%d] %s\n" "$((i + 1))" "$info_line"
+    done
+    echo ""
+
+    read -rp "Select drive number [1-${#USB_DEVICES[@]}]: " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] || die "Invalid selection"
+    ((choice >= 1 && choice <= ${#USB_DEVICES[@]})) || die "Out of range"
+    DEVICE="${USB_DEVICES[$((choice - 1))]}"
+fi
+
+# --- Safety confirmation ---
+
+echo ""
+echo -e "${BOLD}Selected device:${RESET}"
+lsblk -po NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DEVICE"
+echo ""
+
+SIZE=$(lsblk -dnpo SIZE "$DEVICE" | xargs)
+MODEL=$(lsblk -dnpo MODEL "$DEVICE" | xargs)
+
+warn "ALL DATA on ${DEVICE} (${MODEL:-unknown}, ${SIZE}) will be permanently destroyed."
+echo ""
+read -rp "Type YES to confirm: " confirm
+[[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 0; }
+
+# --- Unmount any mounted partitions ---
+
+info "Unmounting partitions..."
+for part in $(lsblk -npo NAME "$DEVICE" | tail -n +2); do
+    if mountpoint -q "$(lsblk -npo MOUNTPOINT "$part" 2>/dev/null)" 2>/dev/null; then
+        umount "$part" && echo "  Unmounted $part"
+    fi
+done
+
+# --- Wipe ---
+
+info "Wiping filesystem signatures..."
+wipefs --all --force "$DEVICE"
+
+info "Zeroing first and last 1 MiB (clears partition tables and backup headers)..."
+dd if=/dev/zero of="$DEVICE" bs=1M count=1 status=none
+SECTORS=$(blockdev --getsz "$DEVICE")
+SECTOR_SIZE=$(blockdev --getss "$DEVICE")
+TAIL_OFFSET=$(( (SECTORS * SECTOR_SIZE) - 1048576 ))
+if [[ $TAIL_OFFSET -gt 0 ]]; then
+    dd if=/dev/zero of="$DEVICE" bs=1 count=1048576 seek="$TAIL_OFFSET" status=none
+fi
+
+# --- Partition (GPT + single exFAT partition) ---
+
+info "Creating GPT partition table with single exFAT partition..."
+parted -s "$DEVICE" mklabel gpt
+parted -s "$DEVICE" mkpart primary 1MiB 100%
+parted -s "$DEVICE" set 1 msftdata on
+
+# Wait for kernel to re-read partition table
+partprobe "$DEVICE"
+sleep 1
+
+# Determine partition path (handles /dev/sdX1 and /dev/nvmeXnYp1 styles)
+if [[ "$DEVICE" =~ [0-9]$ ]]; then
+    PART="${DEVICE}p1"
+else
+    PART="${DEVICE}1"
+fi
+
+[[ -b "$PART" ]] || die "Expected partition $PART not found after partitioning"
+
+# --- Format ---
+
+info "Formatting ${PART} as exFAT..."
+mkfs.exfat -L "USB" "$PART"
+
+# --- Done ---
+
+echo ""
+info "Done! ${DEVICE} is ready for Windows."
+echo -e "  Label:       USB"
+echo -e "  Filesystem:  exFAT"
+echo -e "  Partition:   GPT"
+echo ""
+echo -e "  Safely eject with: ${BOLD}sudo eject ${DEVICE}${RESET}"
