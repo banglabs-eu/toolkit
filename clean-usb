@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# clean-usb — Safely wipe and format attached USB drives for Windows use (exFAT + GPT).
-# Usage: sudo ./clean-usb [--secure] [DEVICE]
-#   --secure   Zero the entire drive before formatting (slow but unrecoverable)
-#   If DEVICE is omitted, lists detected USB drives and prompts for selection.
+# clean-usb — Manage attached USB drives: wipe, secure wipe, or browse.
+# Usage: sudo cleanusb [--secure|--open] [DEVICE]
+#   No args:     Interactive — shows each USB, choose what to do
+#   --secure DEV Full zero wipe + format
+#   --open DEV   Just mount and open in file browser
+#   DEVICE       Quick wipe + format
+#
+# Writes a report to ~/usb-report.md after each wipe with speed benchmarks.
 
 set -euo pipefail
 
@@ -10,19 +14,34 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BOLD='\033[1m'
+DIM='\033[2m'
 RESET='\033[0m'
 
 die()  { echo -e "${RED}Error: $*${RESET}" >&2; exit 1; }
 warn() { echo -e "${YELLOW}$*${RESET}"; }
 info() { echo -e "${GREEN}$*${RESET}"; }
 
-# --- Parse flags ---
+SUDO_USER="${SUDO_USER:-$USER}"
+SUDO_HOME=$(eval echo "~$SUDO_USER")
+MOUNT_BASE="/media/${SUDO_USER}"
+REPORT_FILE="${SUDO_HOME}/usb-report.md"
 
-SECURE=false
-if [[ "${1:-}" == "--secure" ]]; then
-    SECURE=true
-    shift
-fi
+# --- Progress bar ---
+
+# Usage: progress_bar "Label" current total
+progress_bar() {
+    local label="$1" current="$2" total="$3"
+    local width=40 pct filled empty bar
+    pct=$(( current * 100 / total ))
+    filled=$(( current * width / total ))
+    empty=$(( width - filled ))
+    bar=$(printf '%*s' "$filled" '' | tr ' ' '#')
+    bar+=$(printf '%*s' "$empty" '' | tr ' ' '-')
+    printf "\r  ${GREEN}%-20s${RESET} [${bar}] %3d%%" "$label" "$pct"
+    if [[ "$current" -eq "$total" ]]; then
+        echo ""
+    fi
+}
 
 # --- Preflight checks ---
 
@@ -32,164 +51,392 @@ for cmd in lsblk wipefs parted mkfs.exfat; do
     command -v "$cmd" &>/dev/null || die "'$cmd' not found. Install with: sudo apt install parted exfatprogs"
 done
 
-# --- Discover USB block devices ---
+# --- Helpers ---
 
 get_usb_devices() {
     lsblk -dnpo NAME,TRAN,TYPE | awk '$2 == "usb" && $3 == "disk" { print $1 }'
 }
 
-# --- Select device ---
-
-DEVICES=()
-
-if [[ -n "${1:-}" ]]; then
-    DEVICE="$1"
-    TRAN=$(lsblk -dnpo TRAN "$DEVICE" 2>/dev/null) || die "$DEVICE does not exist"
-    [[ "$TRAN" == "usb" ]] || die "$DEVICE is not a USB device (transport: ${TRAN:-unknown}). Refusing to proceed."
-    DEVICES+=("$DEVICE")
-else
-    mapfile -t USB_DEVICES < <(get_usb_devices)
-
-    if [[ ${#USB_DEVICES[@]} -eq 0 ]]; then
-        die "No USB drives detected. Plug one in and try again."
-    fi
-
-    echo -e "${BOLD}Detected USB drives:${RESET}"
-    echo ""
-    for dev in "${USB_DEVICES[@]}"; do
-        SIZE=$(lsblk -dnpo SIZE "$dev" | xargs)
-        MODEL=$(lsblk -dnpo MODEL "$dev" | xargs)
-        echo -e "  ${BOLD}${dev}${RESET} — ${MODEL:-unknown}, ${SIZE}"
-        lsblk -po NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$dev" | tail -n +2 | sed 's/^/    /'
-        echo ""
-        if $SECURE; then
-            warn "  ALL DATA will be SECURELY WIPED (full zero pass)."
-        else
-            warn "  ALL DATA will be permanently destroyed."
+get_usb_version() {
+    local dev="$1"
+    local name syspath p speed
+    name=$(basename "$dev")
+    syspath=$(readlink -f /sys/block/"$name" 2>/dev/null) || { echo "unknown"; return; }
+    p="$syspath"
+    while [[ "$p" != "/" ]]; do
+        if [[ -f "$p/speed" ]]; then
+            speed=$(cat "$p/speed")
+            case "$speed" in
+                12)    echo "USB 1.1" ;;
+                480)   echo "USB 2.0" ;;
+                5000)  echo "USB 3.0" ;;
+                10000) echo "USB 3.1" ;;
+                20000) echo "USB 3.2" ;;
+                *)     echo "USB (${speed} Mbps)" ;;
+            esac
+            return
         fi
-        echo ""
-        read -rp "  Wipe ${MODEL:-unknown} (${SIZE})? [y/N]: " answer
-        if [[ "${answer,,}" == "y" ]]; then
-            DEVICES+=("$dev")
-            info "  -> Marked for wiping."
-        else
-            echo "  -> Skipped."
-        fi
-        echo ""
+        p=$(dirname "$p")
     done
+    echo "unknown"
+}
 
-    if [[ ${#DEVICES[@]} -eq 0 ]]; then
-        echo "No drives selected. Aborted."
-        exit 0
+ensure_mounted() {
+    local dev="$1"
+    local part mount_point label
+
+    part=$(lsblk -npo NAME "$dev" | tail -n +2 | head -1)
+    if [[ -z "$part" ]]; then
+        echo ""
+        return
     fi
 
-    echo -e "${BOLD}Summary — will wipe:${RESET}"
-    for dev in "${DEVICES[@]}"; do
-        MODEL=$(lsblk -dnpo MODEL "$dev" | xargs)
-        SIZE=$(lsblk -dnpo SIZE "$dev" | xargs)
-        echo "  ${dev} — ${MODEL:-unknown}, ${SIZE}"
-    done
-    if ! $SECURE; then
-        echo -e "  (Use ${BOLD}--secure${RESET} for full zero wipe — slower but unrecoverable)"
+    mount_point=$(lsblk -npo MOUNTPOINT "$part" 2>/dev/null | xargs)
+    if [[ -n "$mount_point" ]]; then
+        echo "$mount_point"
+        return
     fi
-    echo ""
-    read -rp "Type YES to confirm: " confirm
-    [[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 0; }
-fi
 
-# --- Process each device ---
+    label=$(lsblk -npo LABEL "$part" 2>/dev/null | xargs)
+    label="${label:-USB}"
+    mount_point="${MOUNT_BASE}/${label}"
+    mkdir -p "$mount_point"
+    mount "$part" "$mount_point" 2>/dev/null && echo "$mount_point" || echo ""
+}
 
-SUDO_USER="${SUDO_USER:-$USER}"
-MOUNT_BASE="/media/${SUDO_USER}"
+open_in_browser() {
+    local path="$1"
+    sudo -u "$SUDO_USER" xdg-open "$path" &>/dev/null &
+    disown
+}
 
-for DEVICE in "${DEVICES[@]}"; do
-    MODEL=$(lsblk -dnpo MODEL "$DEVICE" | xargs)
-    SIZE=$(lsblk -dnpo SIZE "$DEVICE" | xargs)
-    echo ""
-    echo -e "${BOLD}=== ${MODEL:-unknown} (${SIZE}) — ${DEVICE} ===${RESET}"
+show_device() {
+    local dev="$1"
+    local size model usb_ver
+    size=$(lsblk -dnpo SIZE "$dev" | xargs)
+    model=$(lsblk -dnpo MODEL "$dev" | xargs)
+    usb_ver=$(get_usb_version "$dev")
 
-    # --- Unmount any mounted partitions ---
+    echo -e "  ${BOLD}${model:-unknown}${RESET} — ${size}, ${usb_ver} ${DIM}(${dev})${RESET}"
+    lsblk -po NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$dev" | tail -n +2 | sed 's/^/    /'
+}
 
-    info "Unmounting partitions..."
-    for part in $(lsblk -npo NAME "$DEVICE" | tail -n +2); do
+unmount_device() {
+    local dev="$1"
+    for part in $(lsblk -npo NAME "$dev" | tail -n +2); do
         if mountpoint -q "$(lsblk -npo MOUNTPOINT "$part" 2>/dev/null)" 2>/dev/null; then
             umount "$part" && echo "  Unmounted $part"
         fi
     done
+}
 
-    # --- Wipe ---
+# --- Speed benchmark ---
+
+benchmark_device() {
+    local part="$1" mount_point="$2"
+    local test_file="${mount_point}/.cleanusb_benchmark"
+    local bs=1048576 count=64 i
+    local write_speed read_speed
+
+    # Write benchmark with progress
+    for ((i = 1; i <= count; i++)); do
+        dd if=/dev/zero of="$test_file" bs=$bs seek=$((i - 1)) count=1 conv=notrunc status=none
+        progress_bar "Bench write" "$i" "$count"
+    done
+    sync
+    # Get write speed from a single timed pass
+    write_speed=$(dd if=/dev/zero of="$test_file" bs=1M count=$count conv=fsync 2>&1 | \
+        grep -oP '[\d.]+ [MG]B/s' | tail -1)
+
+    # Clear cache before read test
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+
+    # Read benchmark with progress
+    for ((i = 1; i <= count; i++)); do
+        dd if="$test_file" of=/dev/null bs=$bs skip=$((i - 1)) count=1 status=none
+        progress_bar "Bench read" "$i" "$count"
+    done
+    # Get read speed from a single timed pass
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    read_speed=$(dd if="$test_file" of=/dev/null bs=1M count=$count 2>&1 | \
+        grep -oP '[\d.]+ [MG]B/s' | tail -1)
+
+    rm -f "$test_file"
+
+    echo "${write_speed:-N/A}|${read_speed:-N/A}"
+}
+
+# --- Integrity check ---
+
+verify_integrity() {
+    local dev="$1" part="$2" mount_point="$3"
+    local test_file="${mount_point}/.cleanusb_verify"
+    local checksum_src checksum_dst
+    local count=16 i
+
+    # Write 16 MiB of random data with progress
+    for ((i = 1; i <= count; i++)); do
+        dd if=/dev/urandom of="$test_file" bs=1M seek=$((i - 1)) count=1 conv=notrunc status=none
+        progress_bar "Integrity write" "$i" "$count"
+    done
+    sync
+
+    checksum_src=$(md5sum "$test_file" | awk '{print $1}')
+
+    # Drop caches and re-read with progress
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    # Read back to warm up, then checksum
+    for ((i = 1; i <= count; i++)); do
+        dd if="$test_file" of=/dev/null bs=1M skip=$((i - 1)) count=1 status=none
+        progress_bar "Integrity read" "$i" "$count"
+    done
+
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    checksum_dst=$(md5sum "$test_file" | awk '{print $1}')
+
+    rm -f "$test_file"
+
+    if [[ "$checksum_src" == "$checksum_dst" ]]; then
+        info "  Integrity PASSED (md5: ${checksum_src:0:12}...)"
+        echo "PASS"
+    else
+        warn "  Integrity FAILED! (wrote: ${checksum_src}, read: ${checksum_dst})"
+        echo "FAIL"
+    fi
+}
+
+# --- Report ---
+
+init_report() {
+    if [[ ! -f "$REPORT_FILE" ]]; then
+        cat > "$REPORT_FILE" <<'HEADER'
+# USB Drive Report
+
+| Date | Name | Size | USB Type | Write Speed | Read Speed | Integrity | Action |
+|------|------|------|----------|-------------|------------|-----------|--------|
+HEADER
+        chown "$SUDO_USER":"$SUDO_USER" "$REPORT_FILE" 2>/dev/null || true
+    fi
+}
+
+append_report() {
+    local model="$1" size="$2" usb_ver="$3" write_spd="$4" read_spd="$5" integrity="$6" action="$7"
+    local date
+    date=$(date '+%Y-%m-%d %H:%M')
+    echo "| ${date} | ${model} | ${size} | ${usb_ver} | ${write_spd} | ${read_spd} | ${integrity} | ${action} |" >> "$REPORT_FILE"
+}
+
+# --- Wipe device ---
+
+wipe_device() {
+    local dev="$1" secure="$2"
+    local size model label part usb_ver mount_point
+    local write_speed="—" read_speed="—" integrity="—" action_name
+
+    size=$(lsblk -dnpo SIZE "$dev" | xargs)
+    model=$(lsblk -dnpo MODEL "$dev" | xargs)
+    usb_ver=$(get_usb_version "$dev")
+
+    if $secure; then
+        action_name="Secure wipe"
+    else
+        action_name="Quick wipe"
+    fi
+
+    info "Unmounting partitions..."
+    unmount_device "$dev"
 
     info "Wiping filesystem signatures..."
-    wipefs --all --force "$DEVICE"
+    wipefs --all --force "$dev"
 
-    if $SECURE; then
-        info "Securely zeroing entire drive (${SIZE})... this will take a while."
-        dd if=/dev/zero of="$DEVICE" bs=4M status=progress conv=fsync 2>&1
+    if $secure; then
+        info "Securely zeroing entire drive (${size})..."
+        dd if=/dev/zero of="$dev" bs=4M status=progress conv=fsync 2>&1
         info "Full zero wipe complete."
     else
-        info "Zeroing first and last 1 MiB (clears partition tables and backup headers)..."
-        dd if=/dev/zero of="$DEVICE" bs=1M count=1 status=none
-        SECTORS=$(blockdev --getsz "$DEVICE")
-        SECTOR_SIZE=$(blockdev --getss "$DEVICE")
-        TAIL_OFFSET=$(( (SECTORS * SECTOR_SIZE) - 1048576 ))
-        if [[ $TAIL_OFFSET -gt 0 ]]; then
-            dd if=/dev/zero of="$DEVICE" bs=1 count=1048576 seek="$TAIL_OFFSET" status=none
+        progress_bar "Zero head" 0 2
+        dd if=/dev/zero of="$dev" bs=1M count=1 status=none
+        progress_bar "Zero head" 1 2
+        local sectors sector_size tail_offset
+        sectors=$(blockdev --getsz "$dev")
+        sector_size=$(blockdev --getss "$dev")
+        tail_offset=$(( (sectors * sector_size) - 1048576 ))
+        if [[ $tail_offset -gt 0 ]]; then
+            dd if=/dev/zero of="$dev" bs=1 count=1048576 seek="$tail_offset" status=none
         fi
+        progress_bar "Zero head+tail" 2 2
     fi
 
-    # --- Partition (GPT + single exFAT partition) ---
+    # Label from model name (exFAT max 11 chars)
+    label=$(echo "${model:-USB}" | tr -cs '[:alnum:]' ' ' | xargs | cut -c1-11)
 
-    # Use a label based on the model name, fallback to "USB"
-    LABEL=$(echo "${MODEL:-USB}" | tr -cs '[:alnum:]' ' ' | xargs | cut -c1-11)
-
-    info "Creating GPT partition table with single exFAT partition..."
-    parted -s "$DEVICE" mklabel gpt
-    parted -s "$DEVICE" mkpart primary 1MiB 100%
-    parted -s "$DEVICE" set 1 msftdata on
-
-    partprobe "$DEVICE"
+    progress_bar "Partitioning" 0 3
+    parted -s "$dev" mklabel gpt
+    progress_bar "Partitioning" 1 3
+    parted -s "$dev" mkpart primary 1MiB 100%
+    progress_bar "Partitioning" 2 3
+    parted -s "$dev" set 1 msftdata on
+    partprobe "$dev"
     sleep 1
+    progress_bar "Partitioning" 3 3
 
-    # Determine partition path
-    if [[ "$DEVICE" =~ [0-9]$ ]]; then
-        PART="${DEVICE}p1"
+    if [[ "$dev" =~ [0-9]$ ]]; then
+        part="${dev}p1"
     else
-        PART="${DEVICE}1"
+        part="${dev}1"
     fi
 
-    [[ -b "$PART" ]] || die "Expected partition $PART not found after partitioning"
+    [[ -b "$part" ]] || die "Expected partition $part not found after partitioning"
 
-    # --- Format ---
+    progress_bar "Formatting" 0 1
+    mkfs.exfat -L "$label" "$part" >/dev/null
+    progress_bar "Formatting" 1 1
 
-    info "Formatting ${PART} as exFAT (label: ${LABEL})..."
-    mkfs.exfat -L "$LABEL" "$PART"
+    # Mount the fresh partition
+    mount_point="${MOUNT_BASE}/${label}"
+    mkdir -p "$mount_point"
+    mount -o uid=$(id -u "$SUDO_USER"),gid=$(id -g "$SUDO_USER") "$part" "$mount_point"
 
-    # --- Mount ---
+    info "Mounted at ${mount_point}"
 
-    MOUNT_POINT="${MOUNT_BASE}/${LABEL}"
-    mkdir -p "$MOUNT_POINT"
-    mount -o uid=$(id -u "$SUDO_USER"),gid=$(id -g "$SUDO_USER") "$PART" "$MOUNT_POINT"
+    # Integrity check
+    integrity=$(verify_integrity "$dev" "$part" "$mount_point")
 
-    info "Mounted at ${MOUNT_POINT}"
+    # Speed benchmark
+    local bench_result
+    bench_result=$(benchmark_device "$part" "$mount_point")
+    write_speed="${bench_result%%|*}"
+    read_speed="${bench_result##*|}"
+    info "  Write: ${write_speed}  Read: ${read_speed}"
 
-    # --- Done for this device ---
+    # Write report
+    init_report
+    append_report "${model:-unknown}" "$size" "$usb_ver" "$write_speed" "$read_speed" "$integrity" "$action_name"
+    info "Report updated: ${REPORT_FILE}"
 
     echo ""
-    info "Done! ${DEVICE} is ready for Windows."
-    echo -e "  Label:       ${LABEL}"
+    info "Done! ${dev} is ready for Windows."
+    echo -e "  Label:       ${label}"
     echo -e "  Filesystem:  exFAT"
     echo -e "  Partition:   GPT"
-    echo -e "  Mounted at:  ${MOUNT_POINT}"
+    echo -e "  USB:         ${usb_ver}"
+    echo -e "  Write:       ${write_speed}"
+    echo -e "  Read:        ${read_speed}"
+    echo -e "  Integrity:   ${integrity}"
+    echo -e "  Mounted at:  ${mount_point}"
     echo ""
 
     read -rp "Open in file browser? [y/N]: " open_answer
     if [[ "${open_answer,,}" == "y" ]]; then
-        sudo -u "$SUDO_USER" xdg-open "$MOUNT_POINT" &>/dev/null &
-        disown
-        info "Opened ${MOUNT_POINT} in file browser."
+        open_in_browser "$mount_point"
+        info "Opened ${mount_point} in file browser."
     fi
+}
+
+# --- Direct mode (with arguments) ---
+
+if [[ -n "${1:-}" ]]; then
+    MODE="wipe"
+    if [[ "$1" == "--secure" ]]; then
+        MODE="secure"
+        shift
+    elif [[ "$1" == "--open" ]]; then
+        MODE="open"
+        shift
+    fi
+
+    DEVICE="${1:-}"
+    [[ -n "$DEVICE" ]] || die "No device specified"
+    TRAN=$(lsblk -dnpo TRAN "$DEVICE" 2>/dev/null) || die "$DEVICE does not exist"
+    [[ "$TRAN" == "usb" ]] || die "$DEVICE is not a USB device (transport: ${TRAN:-unknown}). Refusing to proceed."
+
+    case "$MODE" in
+        open)
+            mount_point=$(ensure_mounted "$DEVICE")
+            [[ -n "$mount_point" ]] || die "Could not mount $DEVICE — no partitions found"
+            open_in_browser "$mount_point"
+            info "Opened ${mount_point} in file browser."
+            ;;
+        secure)
+            show_device "$DEVICE"
+            echo ""
+            warn "ALL DATA will be SECURELY WIPED (full zero pass)."
+            echo ""
+            read -rp "Type YES to confirm: " confirm
+            [[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 0; }
+            wipe_device "$DEVICE" true
+            ;;
+        wipe)
+            show_device "$DEVICE"
+            echo ""
+            warn "ALL DATA will be permanently destroyed."
+            echo ""
+            read -rp "Type YES to confirm: " confirm
+            [[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 0; }
+            wipe_device "$DEVICE" false
+            ;;
+    esac
+    exit 0
+fi
+
+# --- Interactive mode (no arguments) ---
+
+mapfile -t USB_DEVICES < <(get_usb_devices)
+
+if [[ ${#USB_DEVICES[@]} -eq 0 ]]; then
+    die "No USB drives detected. Plug one in and try again."
+fi
+
+# Mount all USB devices first so we can show their state
+for dev in "${USB_DEVICES[@]}"; do
+    ensure_mounted "$dev" >/dev/null
 done
 
 echo ""
+echo -e "${BOLD}USB drives:${RESET}"
+echo ""
+
+for dev in "${USB_DEVICES[@]}"; do
+    show_device "$dev"
+    echo ""
+    echo -e "  ${BOLD}[w]${RESET} Wipe (quick)    ${BOLD}[s]${RESET} Secure wipe    ${BOLD}[o]${RESET} Open in file browser    ${BOLD}[enter]${RESET} Skip"
+    read -rp "  Action: " action
+
+    case "${action,,}" in
+        w)
+            warn "  ALL DATA on this drive will be permanently destroyed."
+            read -rp "  Type YES to confirm: " confirm
+            if [[ "$confirm" == "YES" ]]; then
+                wipe_device "$dev" false
+            else
+                echo "  Skipped."
+            fi
+            ;;
+        s)
+            warn "  ALL DATA will be SECURELY WIPED (full zero pass). This will take a while."
+            read -rp "  Type YES to confirm: " confirm
+            if [[ "$confirm" == "YES" ]]; then
+                wipe_device "$dev" true
+            else
+                echo "  Skipped."
+            fi
+            ;;
+        o)
+            mount_point=$(ensure_mounted "$dev")
+            if [[ -n "$mount_point" ]]; then
+                open_in_browser "$mount_point"
+                info "  Opened ${mount_point} in file browser."
+            else
+                warn "  Could not mount — no partitions found. Wipe first?"
+            fi
+            ;;
+        *)
+            echo "  Skipped."
+            ;;
+    esac
+    echo ""
+done
+
 info "All done!"
+echo -e "  Report: ${BOLD}${REPORT_FILE}${RESET}"
 echo -e "  Safely eject with: ${BOLD}sudo eject /dev/sdX${RESET}"
