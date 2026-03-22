@@ -46,11 +46,11 @@ done
 if command -v cargo &>/dev/null && [[ -d "$SCRIPT_DIR/cosmic-clean-usb" ]]; then
     info "Building cosmic-clean-usb..."
     cargo build --release --manifest-path "$SCRIPT_DIR/cosmic-clean-usb/Cargo.toml"
-    ln -sf "$SCRIPT_DIR/cosmic-clean-usb/target/release/cosmic-clean-usb" "$BIN_DIR/cosmic-clean-usb"
-    echo "  cosmic-clean-usb — built and linked"
+    ln -sf "$SCRIPT_DIR/cosmic-clean-usb-launcher" "$BIN_DIR/cleanusb-gui"
+    echo "  cleanusb-gui — built and linked"
 else
     echo "  cosmic-clean-usb — skipped (cargo not found)"
 fi
 
 echo ""
-info "Done. Tools available: ${TOOLS[*]} cosmic-clean-usb"
+info "Done. Tools available: ${TOOLS[*]} cleanusb-gui"

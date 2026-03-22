@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# clean-usb-backend — Non-interactive backend for cosmic-clean-usb GUI.
+# Called via pkexec. Outputs JSON result on success.
+# Usage: clean-usb-backend <quick|secure> <device> <user>
+set -euo pipefail
+
+MODE="${1:?Usage: clean-usb-backend <quick|secure> <device> <user>}"
+DEV="${2:?}"
+OWNER="${3:?}"
+
+MOUNT_BASE="/media/${OWNER}"
+
+for cmd in lsblk wipefs parted mkfs.exfat; do
+    command -v "$cmd" &>/dev/null || { echo "{\"error\":\"$cmd not found\"}" ; exit 1; }
+done
+
+# --- USB info ---
+
+SIZE=$(lsblk -dnpo SIZE "$DEV" | xargs)
+MODEL=$(lsblk -dnpo MODEL "$DEV" | xargs)
+
+get_usb_version() {
+    local name syspath p speed
+    name=$(basename "$1")
+    syspath=$(readlink -f /sys/block/"$name" 2>/dev/null) || { echo "Unknown"; return; }
+    p="$syspath"
+    while [[ "$p" != "/" ]]; do
+        if [[ -f "$p/speed" ]]; then
+            speed=$(cat "$p/speed")
+            case "$speed" in
+                12)    echo "USB 1.1"; return ;;
+                480)   echo "USB 2.0"; return ;;
+                5000)  echo "USB 3.0"; return ;;
+                10000) echo "USB 3.1"; return ;;
+                20000) echo "USB 3.2"; return ;;
+                *)     echo "USB (${speed} Mbps)"; return ;;
+            esac
+        fi
+        p=$(dirname "$p")
+    done
+    echo "Unknown"
+}
+
+USB_VER=$(get_usb_version "$DEV")
+
+# --- Unmount ---
+
+for part in $(lsblk -npo NAME "$DEV" | tail -n +2); do
+    if mountpoint -q "$(lsblk -npo MOUNTPOINT "$part" 2>/dev/null)" 2>/dev/null; then
+        umount "$part"
+    fi
+done
+
+# --- Wipe ---
+
+wipefs --all --force "$DEV" >/dev/null 2>&1
+
+if [[ "$MODE" == "secure" ]]; then
+    dd if=/dev/zero of="$DEV" bs=4M status=none conv=fsync 2>/dev/null || true
+else
+    dd if=/dev/zero of="$DEV" bs=1M count=1 status=none 2>/dev/null
+    SECTORS=$(blockdev --getsz "$DEV")
+    SECTOR_SIZE=$(blockdev --getss "$DEV")
+    TAIL_OFFSET=$(( (SECTORS * SECTOR_SIZE) - 1048576 ))
+    if [[ $TAIL_OFFSET -gt 0 ]]; then
+        dd if=/dev/zero of="$DEV" bs=1 count=1048576 seek="$TAIL_OFFSET" status=none 2>/dev/null
+    fi
+fi
+
+# --- Label ---
+
+LABEL=$(echo "${MODEL:-USB}" | tr -cs '[:alnum:]' ' ' | xargs | cut -c1-11)
+[[ -n "$LABEL" ]] || LABEL="USB"
+
+# --- Partition + Format ---
+
+parted -s "$DEV" mklabel gpt
+parted -s "$DEV" mkpart primary 1MiB 100%
+parted -s "$DEV" set 1 msftdata on
+partprobe "$DEV"
+sleep 1
+
+if [[ "$DEV" =~ [0-9]$ ]]; then
+    PART="${DEV}p1"
+else
+    PART="${DEV}1"
+fi
+
+mkfs.exfat -L "$LABEL" "$PART" >/dev/null 2>&1
+
+# --- Mount ---
+
+MOUNT_POINT="${MOUNT_BASE}/${LABEL}"
+mkdir -p "$MOUNT_POINT"
+UID_NUM=$(id -u "$OWNER")
+GID_NUM=$(id -g "$OWNER")
+mount -o "uid=${UID_NUM},gid=${GID_NUM}" "$PART" "$MOUNT_POINT"
+
+# --- Integrity ---
+
+TEST_FILE="${MOUNT_POINT}/.cleanusb_verify"
+dd if=/dev/urandom of="$TEST_FILE" bs=1M count=16 status=none 2>/dev/null
+sync
+SUM1=$(md5sum "$TEST_FILE" | awk '{print $1}')
+echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+SUM2=$(md5sum "$TEST_FILE" | awk '{print $1}')
+rm -f "$TEST_FILE"
+
+if [[ -n "$SUM1" && "$SUM1" == "$SUM2" ]]; then
+    INTEGRITY="PASS"
+else
+    INTEGRITY="FAIL"
+fi
+
+# --- Benchmark ---
+
+BENCH_FILE="${MOUNT_POINT}/.cleanusb_benchmark"
+WRITE_SPEED=$(dd if=/dev/zero of="$BENCH_FILE" bs=1M count=64 conv=fsync 2>&1 | grep -oP '[\d.]+ [MG]B/s' | tail -1)
+echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+READ_SPEED=$(dd if="$BENCH_FILE" of=/dev/null bs=1M count=64 2>&1 | grep -oP '[\d.]+ [MG]B/s' | tail -1)
+rm -f "$BENCH_FILE"
+
+WRITE_SPEED="${WRITE_SPEED:-N/A}"
+READ_SPEED="${READ_SPEED:-N/A}"
+
+# --- Report ---
+
+REPORT_FILE="/home/${OWNER}/usb-report.md"
+if [[ ! -f "$REPORT_FILE" ]]; then
+    printf '# USB Drive Report\n\n| Date | Name | Size | USB Type | Write Speed | Read Speed | Integrity | Action |\n|------|------|------|----------|-------------|------------|-----------|--------|\n' > "$REPORT_FILE"
+    chown "${OWNER}:${OWNER}" "$REPORT_FILE" 2>/dev/null || true
+fi
+
+ACTION_NAME="Quick wipe"
+[[ "$MODE" == "secure" ]] && ACTION_NAME="Secure wipe"
+DATE=$(date '+%Y-%m-%d %H:%M')
+echo "| ${DATE} | ${MODEL} | ${SIZE} | ${USB_VER} | ${WRITE_SPEED} | ${READ_SPEED} | ${INTEGRITY} | ${ACTION_NAME} |" >> "$REPORT_FILE"
+
+# --- JSON output ---
+
+cat <<ENDJSON
+{"device":"${DEV}","model":"${MODEL}","size":"${SIZE}","usb_version":"${USB_VER}","label":"${LABEL}","mount_point":"${MOUNT_POINT}","write_speed":"${WRITE_SPEED}","read_speed":"${READ_SPEED}","integrity":"${INTEGRITY}","action":"${ACTION_NAME}"}
+ENDJSON
