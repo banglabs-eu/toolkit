@@ -41,5 +41,16 @@ for script in "${!TOOLS[@]}"; do
     fi
 done
 
+# --- Build COSMIC app (if cargo is available) ---
+
+if command -v cargo &>/dev/null && [[ -d "$SCRIPT_DIR/cosmic-clean-usb" ]]; then
+    info "Building cosmic-clean-usb..."
+    cargo build --release --manifest-path "$SCRIPT_DIR/cosmic-clean-usb/Cargo.toml"
+    ln -sf "$SCRIPT_DIR/cosmic-clean-usb/target/release/cosmic-clean-usb" "$BIN_DIR/cosmic-clean-usb"
+    echo "  cosmic-clean-usb — built and linked"
+else
+    echo "  cosmic-clean-usb — skipped (cargo not found)"
+fi
+
 echo ""
-info "Done. Tools available: ${TOOLS[*]}"
+info "Done. Tools available: ${TOOLS[*]} cosmic-clean-usb"

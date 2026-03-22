@@ -26,9 +26,19 @@ sudo cleanusb --open /dev/sdX      # mount and open in file browser
 Interactive mode presents each USB with: `[w]` wipe, `[s]` secure wipe, `[o]` open, or skip.
 
 After each wipe:
-- Speaks progress and results via `spd-say`
+- Shows progress bars for each step
 - Runs an integrity check (write random data, flush, re-read, compare md5)
 - Benchmarks sustained read/write speed (64 MiB)
 - Appends results to `~/usb-report.md`
 
 Only targets USB devices. Refuses to touch system drives.
+
+### cosmic-clean-usb
+
+COSMIC desktop GUI for the same USB management. Built with libcosmic.
+
+```bash
+sudo cosmic-clean-usb
+```
+
+Shows all connected USB drives with model, size, and USB version. Per device: Quick Wipe, Secure Wipe, or Open. After wiping, shows results (speeds, integrity) and option to open in file browser. Writes to `~/usb-report.md`.

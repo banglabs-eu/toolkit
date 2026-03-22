@@ -18,6 +18,9 @@ node_modules/
 *.swp
 *~
 
+# Rust
+target/
+
 # IDE
 .vscode/
 .idea/
