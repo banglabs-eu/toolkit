@@ -40,11 +40,13 @@ get_usb_devices() {
 
 # --- Select device ---
 
+DEVICES=()
+
 if [[ -n "${1:-}" ]]; then
     DEVICE="$1"
-    # Verify it's actually a USB device
     TRAN=$(lsblk -dnpo TRAN "$DEVICE" 2>/dev/null) || die "$DEVICE does not exist"
     [[ "$TRAN" == "usb" ]] || die "$DEVICE is not a USB device (transport: ${TRAN:-unknown}). Refusing to proceed."
+    DEVICES+=("$DEVICE")
 else
     mapfile -t USB_DEVICES < <(get_usb_devices)
 
@@ -54,100 +56,140 @@ else
 
     echo -e "${BOLD}Detected USB drives:${RESET}"
     echo ""
-    for i in "${!USB_DEVICES[@]}"; do
-        dev="${USB_DEVICES[$i]}"
-        info_line=$(lsblk -dnpo NAME,SIZE,MODEL "$dev" | sed 's/  */ /g')
-        printf "  [%d] %s\n" "$((i + 1))" "$info_line"
+    for dev in "${USB_DEVICES[@]}"; do
+        SIZE=$(lsblk -dnpo SIZE "$dev" | xargs)
+        MODEL=$(lsblk -dnpo MODEL "$dev" | xargs)
+        echo -e "  ${BOLD}${dev}${RESET} — ${MODEL:-unknown}, ${SIZE}"
+        lsblk -po NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$dev" | tail -n +2 | sed 's/^/    /'
+        echo ""
+        if $SECURE; then
+            warn "  ALL DATA will be SECURELY WIPED (full zero pass)."
+        else
+            warn "  ALL DATA will be permanently destroyed."
+        fi
+        echo ""
+        read -rp "  Wipe ${MODEL:-unknown} (${SIZE})? [y/N]: " answer
+        if [[ "${answer,,}" == "y" ]]; then
+            DEVICES+=("$dev")
+            info "  -> Marked for wiping."
+        else
+            echo "  -> Skipped."
+        fi
+        echo ""
     done
+
+    if [[ ${#DEVICES[@]} -eq 0 ]]; then
+        echo "No drives selected. Aborted."
+        exit 0
+    fi
+
+    echo -e "${BOLD}Summary — will wipe:${RESET}"
+    for dev in "${DEVICES[@]}"; do
+        MODEL=$(lsblk -dnpo MODEL "$dev" | xargs)
+        SIZE=$(lsblk -dnpo SIZE "$dev" | xargs)
+        echo "  ${dev} — ${MODEL:-unknown}, ${SIZE}"
+    done
+    if ! $SECURE; then
+        echo -e "  (Use ${BOLD}--secure${RESET} for full zero wipe — slower but unrecoverable)"
+    fi
+    echo ""
+    read -rp "Type YES to confirm: " confirm
+    [[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 0; }
+fi
+
+# --- Process each device ---
+
+SUDO_USER="${SUDO_USER:-$USER}"
+MOUNT_BASE="/media/${SUDO_USER}"
+
+for DEVICE in "${DEVICES[@]}"; do
+    MODEL=$(lsblk -dnpo MODEL "$DEVICE" | xargs)
+    SIZE=$(lsblk -dnpo SIZE "$DEVICE" | xargs)
+    echo ""
+    echo -e "${BOLD}=== ${MODEL:-unknown} (${SIZE}) — ${DEVICE} ===${RESET}"
+
+    # --- Unmount any mounted partitions ---
+
+    info "Unmounting partitions..."
+    for part in $(lsblk -npo NAME "$DEVICE" | tail -n +2); do
+        if mountpoint -q "$(lsblk -npo MOUNTPOINT "$part" 2>/dev/null)" 2>/dev/null; then
+            umount "$part" && echo "  Unmounted $part"
+        fi
+    done
+
+    # --- Wipe ---
+
+    info "Wiping filesystem signatures..."
+    wipefs --all --force "$DEVICE"
+
+    if $SECURE; then
+        info "Securely zeroing entire drive (${SIZE})... this will take a while."
+        dd if=/dev/zero of="$DEVICE" bs=4M status=progress conv=fsync 2>&1
+        info "Full zero wipe complete."
+    else
+        info "Zeroing first and last 1 MiB (clears partition tables and backup headers)..."
+        dd if=/dev/zero of="$DEVICE" bs=1M count=1 status=none
+        SECTORS=$(blockdev --getsz "$DEVICE")
+        SECTOR_SIZE=$(blockdev --getss "$DEVICE")
+        TAIL_OFFSET=$(( (SECTORS * SECTOR_SIZE) - 1048576 ))
+        if [[ $TAIL_OFFSET -gt 0 ]]; then
+            dd if=/dev/zero of="$DEVICE" bs=1 count=1048576 seek="$TAIL_OFFSET" status=none
+        fi
+    fi
+
+    # --- Partition (GPT + single exFAT partition) ---
+
+    # Use a label based on the model name, fallback to "USB"
+    LABEL=$(echo "${MODEL:-USB}" | tr -cs '[:alnum:]' ' ' | xargs | cut -c1-11)
+
+    info "Creating GPT partition table with single exFAT partition..."
+    parted -s "$DEVICE" mklabel gpt
+    parted -s "$DEVICE" mkpart primary 1MiB 100%
+    parted -s "$DEVICE" set 1 msftdata on
+
+    partprobe "$DEVICE"
+    sleep 1
+
+    # Determine partition path
+    if [[ "$DEVICE" =~ [0-9]$ ]]; then
+        PART="${DEVICE}p1"
+    else
+        PART="${DEVICE}1"
+    fi
+
+    [[ -b "$PART" ]] || die "Expected partition $PART not found after partitioning"
+
+    # --- Format ---
+
+    info "Formatting ${PART} as exFAT (label: ${LABEL})..."
+    mkfs.exfat -L "$LABEL" "$PART"
+
+    # --- Mount ---
+
+    MOUNT_POINT="${MOUNT_BASE}/${LABEL}"
+    mkdir -p "$MOUNT_POINT"
+    mount -o uid=$(id -u "$SUDO_USER"),gid=$(id -g "$SUDO_USER") "$PART" "$MOUNT_POINT"
+
+    info "Mounted at ${MOUNT_POINT}"
+
+    # --- Done for this device ---
+
+    echo ""
+    info "Done! ${DEVICE} is ready for Windows."
+    echo -e "  Label:       ${LABEL}"
+    echo -e "  Filesystem:  exFAT"
+    echo -e "  Partition:   GPT"
+    echo -e "  Mounted at:  ${MOUNT_POINT}"
     echo ""
 
-    read -rp "Select drive number [1-${#USB_DEVICES[@]}]: " choice
-    [[ "$choice" =~ ^[0-9]+$ ]] || die "Invalid selection"
-    ((choice >= 1 && choice <= ${#USB_DEVICES[@]})) || die "Out of range"
-    DEVICE="${USB_DEVICES[$((choice - 1))]}"
-fi
-
-# --- Safety confirmation ---
-
-echo ""
-echo -e "${BOLD}Selected device:${RESET}"
-lsblk -po NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$DEVICE"
-echo ""
-
-SIZE=$(lsblk -dnpo SIZE "$DEVICE" | xargs)
-MODEL=$(lsblk -dnpo MODEL "$DEVICE" | xargs)
-
-if $SECURE; then
-    warn "ALL DATA on ${DEVICE} (${MODEL:-unknown}, ${SIZE}) will be SECURELY WIPED (full zero pass)."
-    warn "This will take a while depending on drive size."
-else
-    warn "ALL DATA on ${DEVICE} (${MODEL:-unknown}, ${SIZE}) will be permanently destroyed."
-    echo -e "  (Use ${BOLD}--secure${RESET} for full zero wipe — slower but unrecoverable)"
-fi
-echo ""
-read -rp "Type YES to confirm: " confirm
-[[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 0; }
-
-# --- Unmount any mounted partitions ---
-
-info "Unmounting partitions..."
-for part in $(lsblk -npo NAME "$DEVICE" | tail -n +2); do
-    if mountpoint -q "$(lsblk -npo MOUNTPOINT "$part" 2>/dev/null)" 2>/dev/null; then
-        umount "$part" && echo "  Unmounted $part"
+    read -rp "Open in file browser? [y/N]: " open_answer
+    if [[ "${open_answer,,}" == "y" ]]; then
+        sudo -u "$SUDO_USER" xdg-open "$MOUNT_POINT" &>/dev/null &
+        disown
+        info "Opened ${MOUNT_POINT} in file browser."
     fi
 done
 
-# --- Wipe ---
-
-info "Wiping filesystem signatures..."
-wipefs --all --force "$DEVICE"
-
-if $SECURE; then
-    info "Securely zeroing entire drive (${SIZE})... this will take a while."
-    dd if=/dev/zero of="$DEVICE" bs=4M status=progress conv=fsync 2>&1
-    info "Full zero wipe complete."
-else
-    info "Zeroing first and last 1 MiB (clears partition tables and backup headers)..."
-    dd if=/dev/zero of="$DEVICE" bs=1M count=1 status=none
-    SECTORS=$(blockdev --getsz "$DEVICE")
-    SECTOR_SIZE=$(blockdev --getss "$DEVICE")
-    TAIL_OFFSET=$(( (SECTORS * SECTOR_SIZE) - 1048576 ))
-    if [[ $TAIL_OFFSET -gt 0 ]]; then
-        dd if=/dev/zero of="$DEVICE" bs=1 count=1048576 seek="$TAIL_OFFSET" status=none
-    fi
-fi
-
-# --- Partition (GPT + single exFAT partition) ---
-
-info "Creating GPT partition table with single exFAT partition..."
-parted -s "$DEVICE" mklabel gpt
-parted -s "$DEVICE" mkpart primary 1MiB 100%
-parted -s "$DEVICE" set 1 msftdata on
-
-# Wait for kernel to re-read partition table
-partprobe "$DEVICE"
-sleep 1
-
-# Determine partition path (handles /dev/sdX1 and /dev/nvmeXnYp1 styles)
-if [[ "$DEVICE" =~ [0-9]$ ]]; then
-    PART="${DEVICE}p1"
-else
-    PART="${DEVICE}1"
-fi
-
-[[ -b "$PART" ]] || die "Expected partition $PART not found after partitioning"
-
-# --- Format ---
-
-info "Formatting ${PART} as exFAT..."
-mkfs.exfat -L "USB" "$PART"
-
-# --- Done ---
-
 echo ""
-info "Done! ${DEVICE} is ready for Windows."
-echo -e "  Label:       USB"
-echo -e "  Filesystem:  exFAT"
-echo -e "  Partition:   GPT"
-echo ""
-echo -e "  Safely eject with: ${BOLD}sudo eject ${DEVICE}${RESET}"
+info "All done!"
+echo -e "  Safely eject with: ${BOLD}sudo eject /dev/sdX${RESET}"
