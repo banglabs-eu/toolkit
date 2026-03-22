@@ -1,8 +1,0 @@
-#!/usr/bin/env bash
-# Launcher for cosmic-clean-usb. Runs as current user (pkexec handles elevation).
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-BIN="$SCRIPT_DIR/cosmic-clean-usb/target/release/cosmic-clean-usb"
-
-[[ -x "$BIN" ]] || { echo "Error: $BIN not found. Run ./install first." >&2; exit 1; }
-
-exec "$BIN" "$@"

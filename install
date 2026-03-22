@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# install — Install dependencies and symlink toolkit scripts to ~/.local/bin.
+# install — Build and install all toolkit scripts and apps.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
+APP_ID="com.banglabs.CleanUsb"
 
 info() { echo -e "\033[0;32m$*\033[0m"; }
 
 # --- Dependencies ---
 
 PACKAGES=()
-dpkg -s parted    &>/dev/null || PACKAGES+=(parted)
+dpkg -s parted     &>/dev/null || PACKAGES+=(parted)
 dpkg -s exfatprogs &>/dev/null || PACKAGES+=(exfatprogs)
 
 if [[ ${#PACKAGES[@]} -gt 0 ]]; then
@@ -20,37 +21,30 @@ else
     info "All dependencies already installed."
 fi
 
-# --- Symlinks ---
+# --- CLI tool ---
 
 mkdir -p "$BIN_DIR"
+ln -sf "$SCRIPT_DIR/clean-usb" "$BIN_DIR/cleanusb"
+echo "  cleanusb — linked"
 
-declare -A TOOLS=(
-    [clean-usb]=cleanusb
-)
-
-for script in "${!TOOLS[@]}"; do
-    name="${TOOLS[$script]}"
-    src="$SCRIPT_DIR/$script"
-    dest="$BIN_DIR/$name"
-
-    if [[ -L "$dest" && "$(readlink -f "$dest")" == "$src" ]]; then
-        echo "  $name — already linked"
-    else
-        ln -sf "$src" "$dest"
-        echo "  $name — linked"
-    fi
-done
-
-# --- Build COSMIC app (if cargo is available) ---
+# --- COSMIC app ---
 
 if command -v cargo &>/dev/null && [[ -d "$SCRIPT_DIR/cosmic-clean-usb" ]]; then
     info "Building cosmic-clean-usb..."
     cargo build --release --manifest-path "$SCRIPT_DIR/cosmic-clean-usb/Cargo.toml"
-    ln -sf "$SCRIPT_DIR/cosmic-clean-usb-launcher" "$BIN_DIR/cleanusb-gui"
-    echo "  cleanusb-gui — built and linked"
+
+    info "Installing cosmic-clean-usb (sudo required)..."
+    sudo install -Dm755 "$SCRIPT_DIR/cosmic-clean-usb/target/release/cosmic-clean-usb" /usr/bin/cosmic-clean-usb
+    sudo install -Dm644 "$SCRIPT_DIR/cosmic-clean-usb/data/${APP_ID}.desktop"       /usr/share/applications/${APP_ID}.desktop
+    sudo install -Dm644 "$SCRIPT_DIR/cosmic-clean-usb/data/${APP_ID}.metainfo.xml"  /usr/share/metainfo/${APP_ID}.metainfo.xml
+    sudo install -Dm644 "$SCRIPT_DIR/cosmic-clean-usb/data/${APP_ID}.policy"        /usr/share/polkit-1/actions/${APP_ID}.policy
+    sudo install -Dm644 "$SCRIPT_DIR/cosmic-clean-usb/data/icons/hicolor/scalable/apps/${APP_ID}.svg" /usr/share/icons/hicolor/scalable/apps/${APP_ID}.svg
+    echo "  cosmic-clean-usb — installed to /usr/bin"
 else
     echo "  cosmic-clean-usb — skipped (cargo not found)"
 fi
 
 echo ""
-info "Done. Tools available: ${TOOLS[*]} cleanusb-gui"
+info "Done!"
+echo "  cleanusb         — sudo cleanusb"
+echo "  cosmic-clean-usb — search 'Clean USB' in launcher, or run: cosmic-clean-usb"
