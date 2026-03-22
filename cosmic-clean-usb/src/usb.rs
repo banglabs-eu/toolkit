@@ -154,7 +154,7 @@ fn current_user() -> String {
 pub fn mount_device(device: &str) -> Result<String, String> {
     let partitions = get_partitions(device);
     if partitions.is_empty() {
-        return Err("No partitions on this drive. Wipe it first to create a filesystem.".into());
+        return Err("No partitions — drive is blank. Nothing to browse.".into());
     }
     let part = &partitions[0];
 
