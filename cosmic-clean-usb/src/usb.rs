@@ -180,7 +180,10 @@ pub fn mount_device(device: &str) -> Result<String, String> {
 
 /// Open a path in the default file browser.
 pub fn open_in_browser(path: &str) {
-    let _ = Command::new("xdg-open").arg(path).spawn();
+    // Use cosmic-files directly if available, otherwise gio open (handles spaces in paths)
+    if Command::new("cosmic-files").arg(path).spawn().is_err() {
+        let _ = Command::new("gio").args(["open", path]).spawn();
+    }
 }
 
 /// Wipe a device by calling ourselves via pkexec. Blocking — call from async task.

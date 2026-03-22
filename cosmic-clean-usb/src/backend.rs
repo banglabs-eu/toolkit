@@ -96,11 +96,11 @@ fn wipe(device: &str, mode: WipeMode, user: &str) -> Result<WipeResult, String> 
         }
     }
 
-    // Label from model (exFAT max 11 chars)
+    // Label from model (exFAT max 11 chars, no spaces to avoid path issues)
     let label: String = model.chars()
-        .filter(|c| c.is_alphanumeric() || *c == ' ')
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
         .collect::<String>()
-        .trim()
+        .trim_matches('_')
         .chars()
         .take(11)
         .collect();
