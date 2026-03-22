@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # clean-usb — Safely wipe and format attached USB drives for Windows use (exFAT + GPT).
-# Usage: sudo ./clean-usb [DEVICE]
+# Usage: sudo ./clean-usb [--secure] [DEVICE]
+#   --secure   Zero the entire drive before formatting (slow but unrecoverable)
 #   If DEVICE is omitted, lists detected USB drives and prompts for selection.
 
 set -euo pipefail
@@ -14,6 +15,14 @@ RESET='\033[0m'
 die()  { echo -e "${RED}Error: $*${RESET}" >&2; exit 1; }
 warn() { echo -e "${YELLOW}$*${RESET}"; }
 info() { echo -e "${GREEN}$*${RESET}"; }
+
+# --- Parse flags ---
+
+SECURE=false
+if [[ "${1:-}" == "--secure" ]]; then
+    SECURE=true
+    shift
+fi
 
 # --- Preflight checks ---
 
@@ -68,7 +77,13 @@ echo ""
 SIZE=$(lsblk -dnpo SIZE "$DEVICE" | xargs)
 MODEL=$(lsblk -dnpo MODEL "$DEVICE" | xargs)
 
-warn "ALL DATA on ${DEVICE} (${MODEL:-unknown}, ${SIZE}) will be permanently destroyed."
+if $SECURE; then
+    warn "ALL DATA on ${DEVICE} (${MODEL:-unknown}, ${SIZE}) will be SECURELY WIPED (full zero pass)."
+    warn "This will take a while depending on drive size."
+else
+    warn "ALL DATA on ${DEVICE} (${MODEL:-unknown}, ${SIZE}) will be permanently destroyed."
+    echo -e "  (Use ${BOLD}--secure${RESET} for full zero wipe — slower but unrecoverable)"
+fi
 echo ""
 read -rp "Type YES to confirm: " confirm
 [[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 0; }
@@ -87,13 +102,19 @@ done
 info "Wiping filesystem signatures..."
 wipefs --all --force "$DEVICE"
 
-info "Zeroing first and last 1 MiB (clears partition tables and backup headers)..."
-dd if=/dev/zero of="$DEVICE" bs=1M count=1 status=none
-SECTORS=$(blockdev --getsz "$DEVICE")
-SECTOR_SIZE=$(blockdev --getss "$DEVICE")
-TAIL_OFFSET=$(( (SECTORS * SECTOR_SIZE) - 1048576 ))
-if [[ $TAIL_OFFSET -gt 0 ]]; then
-    dd if=/dev/zero of="$DEVICE" bs=1 count=1048576 seek="$TAIL_OFFSET" status=none
+if $SECURE; then
+    info "Securely zeroing entire drive (${SIZE})... this will take a while."
+    dd if=/dev/zero of="$DEVICE" bs=4M status=progress conv=fsync 2>&1
+    info "Full zero wipe complete."
+else
+    info "Zeroing first and last 1 MiB (clears partition tables and backup headers)..."
+    dd if=/dev/zero of="$DEVICE" bs=1M count=1 status=none
+    SECTORS=$(blockdev --getsz "$DEVICE")
+    SECTOR_SIZE=$(blockdev --getss "$DEVICE")
+    TAIL_OFFSET=$(( (SECTORS * SECTOR_SIZE) - 1048576 ))
+    if [[ $TAIL_OFFSET -gt 0 ]]; then
+        dd if=/dev/zero of="$DEVICE" bs=1 count=1048576 seek="$TAIL_OFFSET" status=none
+    fi
 fi
 
 # --- Partition (GPT + single exFAT partition) ---
