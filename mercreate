@@ -1,14 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-# merview - Generate HTML, SVG, and PNG from a .mmd mermaid file
-# Usage: merview FILE.mmd
+# mercreate - Generate HTML and PNG from a .mmd mermaid file
+# Usage: mercreate FILE.mmd
 
 if [ -z "${1:-}" ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-  echo "Usage: merview FILE.mmd"
+  echo "Usage: mercreate FILE.mmd"
   echo ""
-  echo "Generates HTML, SVG, and PNG in the same directory as the input file."
-  echo "Output files are named: NAME.v1.{html,svg,png}, NAME.v2.{html,svg,png}, etc."
+  echo "Generates HTML and PNG in the same directory as the input file."
+  echo "Output files are named: NAME.v1.{html,png}, NAME.v2.{html,png}, etc."
   exit 0
 fi
 
@@ -23,7 +23,7 @@ name="$(basename "${mmd%.mmd}")"
 
 # Find next version number
 v=1
-while [ -e "${dir}/${name}.v${v}.html" ] || [ -e "${dir}/${name}.v${v}.svg" ] || [ -e "${dir}/${name}.v${v}.png" ]; do
+while [ -e "${dir}/${name}.v${v}.html" ] || [ -e "${dir}/${name}.v${v}.png" ]; do
   v=$((v + 1))
 done
 base="${dir}/${name}.v${v}"
@@ -47,10 +47,6 @@ $(cat "$mmd")
 </html>
 HTMLEOF
 echo "Built ${base}.html"
-
-# SVG
-mmdc -i "$mmd" -o "${base}.svg" -p ~/.mermaidcli.json
-echo "Built ${base}.svg"
 
 # PNG
 mmdc -i "$mmd" -o "${base}.png" -p ~/.mermaidcli.json
