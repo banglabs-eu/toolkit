@@ -1,0 +1,57 @@
+#!/bin/bash
+set -euo pipefail
+
+# merview - Generate HTML, SVG, and PNG from a .mmd mermaid file
+# Usage: merview FILE.mmd
+
+if [ -z "${1:-}" ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+  echo "Usage: merview FILE.mmd"
+  echo ""
+  echo "Generates HTML, SVG, and PNG in the same directory as the input file."
+  echo "Output files are named: NAME.v1.{html,svg,png}, NAME.v2.{html,svg,png}, etc."
+  exit 0
+fi
+
+mmd="$(realpath "$1")"
+if [ ! -f "$mmd" ]; then
+  echo "Error: $mmd not found"
+  exit 1
+fi
+
+dir="$(dirname "$mmd")"
+name="$(basename "${mmd%.mmd}")"
+
+# Find next version number
+v=1
+while [ -e "${dir}/${name}.v${v}.html" ] || [ -e "${dir}/${name}.v${v}.svg" ] || [ -e "${dir}/${name}.v${v}.png" ]; do
+  v=$((v + 1))
+done
+base="${dir}/${name}.v${v}"
+
+# HTML
+cat > "${base}.html" << HTMLEOF
+<html>
+  <head>
+    <title>${name}</title>
+  </head>
+  <body>
+    <pre class="mermaid">
+$(cat "$mmd")
+    </pre>
+
+    <script type="module">
+      import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.esm.min.mjs';
+      mermaid.initialize({ startOnLoad: true });
+    </script>
+  </body>
+</html>
+HTMLEOF
+echo "Built ${base}.html"
+
+# SVG
+mmdc -i "$mmd" -o "${base}.svg" -p ~/.mermaidcli.json
+echo "Built ${base}.svg"
+
+# PNG
+mmdc -i "$mmd" -o "${base}.png" -p ~/.mermaidcli.json
+echo "Built ${base}.png"

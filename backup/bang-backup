@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REMOTE="pcloud"
+DEST="${REMOTE}:Backups/popOS"
+SNAPSHOT_BASE="${REMOTE}:Backups"
+EXCLUDE_FILE="${SCRIPT_DIR}/backup.exclude"
+LOG_DIR="${SCRIPT_DIR}/logs"
+LOG_FILE="${LOG_DIR}/backup-$(date +%Y%m%d-%H%M%S).log"
+PACKAGE_DIR=$(mktemp -d)
+TODAY=$(date +%A)  # day of week
+
+# CLI flags
+DRY_RUN=false
+FORCE=false
+VERBOSE=false
+
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=true ;;
+        --force)   FORCE=true ;;
+        --verbose) VERBOSE=true ;;
+        *) echo "Unknown flag: $arg"; exit 1 ;;
+    esac
+done
+
+# Build rclone flags
+RCLONE_FLAGS=(
+    --exclude-from="$EXCLUDE_FILE"
+    --delete-excluded
+    --transfers=4
+    --checkers=8
+    --fast-list
+    --progress
+)
+
+if $DRY_RUN; then
+    RCLONE_FLAGS+=(--dry-run)
+fi
+
+if $VERBOSE; then
+    RCLONE_FLAGS+=(-v)
+fi
+
+# --- Logging ---
+mkdir -p "$LOG_DIR"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+log() {
+    echo "[$(date '+%H:%M:%S')] $*"
+}
+
+# --- Pre-flight checks ---
+
+check_rclone() {
+    if ! command -v rclone &>/dev/null; then
+        log "ERROR: rclone is not installed. Run: sudo apt install rclone"
+        exit 1
+    fi
+    if ! rclone listremotes 2>/dev/null | grep -q "^${REMOTE}:$"; then
+        log "ERROR: rclone remote '${REMOTE}' not configured. Run: rclone config"
+        exit 1
+    fi
+}
+
+check_metered() {
+    if $FORCE; then
+        return 0
+    fi
+    if command -v nmcli &>/dev/null; then
+        local metered
+        metered=$(nmcli -t -f GENERAL.METERED dev show 2>/dev/null | grep -i 'yes' || true)
+        if [[ -n "$metered" ]]; then
+            log "SKIPPED: Metered network detected. Use --force to override."
+            exit 0
+        fi
+    fi
+}
+
+# --- Package lists ---
+
+dump_package_lists() {
+    log "Dumping package lists..."
+    mkdir -p "$PACKAGE_DIR"
+    dpkg-query --show --showformat='${Package}\t${Version}\n' > "$PACKAGE_DIR/apt-all.txt" 2>/dev/null || true
+    apt-mark showmanual > "$PACKAGE_DIR/apt-manual.txt" 2>/dev/null || true
+    flatpak list --app --columns=application,name > "$PACKAGE_DIR/flatpak-apps.txt" 2>/dev/null || true
+}
+
+# --- Sync functions ---
+
+sync_source() {
+    local label="$1"
+    local src="$2"
+    local dest="$3"
+    shift 3
+    local extra_flags=("$@")
+
+    if [[ ! -e "$src" ]]; then
+        log "SKIP: ${label} — source not found: ${src}"
+        return 0
+    fi
+
+    log "Syncing ${label}..."
+    rclone sync "$src" "${DEST}/${dest}" "${RCLONE_FLAGS[@]}" "${extra_flags[@]}" || {
+        log "WARN: ${label} sync had errors (exit $?)"
+    }
+}
+
+sync_file() {
+    local label="$1"
+    local src="$2"
+    local dest="$3"
+
+    if [[ ! -f "$src" ]]; then
+        log "SKIP: ${label} — file not found: ${src}"
+        return 0
+    fi
+
+    log "Copying ${label}..."
+    rclone copyto "$src" "${DEST}/${dest}" || {
+        log "WARN: ${label} copy had errors (exit $?)"
+    }
+}
+
+# --- Main ---
+
+log "=== Backup started ==="
+if $DRY_RUN; then
+    log "*** DRY RUN — no changes will be made ***"
+fi
+
+check_rclone
+check_metered
+
+# Package lists
+dump_package_lists
+sync_source "package-lists" "$PACKAGE_DIR" "package-lists"
+
+# Code projects
+sync_source "Bang-Labs" "$HOME/Bang-Labs" "Bang-Labs"
+
+# Dotfiles
+sync_file "bashrc"    "$HOME/.bashrc"          "dotfiles/.bashrc"
+sync_file "profile"   "$HOME/.profile"         "dotfiles/.profile"
+sync_file "zshenv"    "$HOME/.zshenv"          "dotfiles/.zshenv"
+sync_file "gitconfig" "$HOME/.gitconfig"       "dotfiles/.gitconfig"
+sync_source "git-config" "$HOME/.config/git"   "dotfiles/git"
+sync_file "ssh-config" "$HOME/.ssh/config"     "dotfiles/ssh_config"
+
+# App configs
+# App configs (cherry-picked — skip browsers, pcloud, etc.)
+for dir in cosmic git kitty wezterm Code libreoffice rclone \
+           qBittorrent qt5ct qt6ct gtk-3.0 gtk-4.0 dconf autostart pulse; do
+    sync_source "config/$dir" "$HOME/.config/$dir" "config/$dir"
+done
+
+# Local share (fonts, keyrings, app data)
+sync_source "local-share" "$HOME/.local/share" "local-share"
+
+# Rust config
+sync_file "rustup-settings" "$HOME/.rustup/settings.toml" "rustup/settings.toml"
+
+# Claude config (selective)
+sync_source "claude" "$HOME/.claude" "claude" \
+    --filter="+ settings.json" \
+    --filter="+ settings.local.json" \
+    --filter="+ projects/**" \
+    --filter="+ plugins/**" \
+    --filter="+ tasks/**" \
+    --filter="- *"
+
+# Cleanup
+rm -rf "$PACKAGE_DIR"
+
+# Weekly snapshot (Sundays) — copy synced folder to a dated snapshot
+if [[ "$TODAY" == "Sunday" ]]; then
+    SNAPSHOT="${SNAPSHOT_BASE}/popOS-$(date +%y%m%d)"
+    if ! rclone lsd "$SNAPSHOT" &>/dev/null; then
+        log "Creating weekly snapshot: $SNAPSHOT"
+        rclone copy "$DEST" "$SNAPSHOT" --progress || {
+            log "WARN: Snapshot had errors (exit $?)"
+        }
+
+        # Prune snapshots older than 4 weeks
+        log "Pruning old snapshots..."
+        rclone lsd "$SNAPSHOT_BASE" 2>/dev/null | awk '{print $NF}' | grep '^popOS-[0-9]\{6\}$' | sort | while read -r dir; do
+            snap_date="${dir#popOS-}"
+            snap_epoch=$(date -d "20${snap_date:0:2}-${snap_date:2:2}-${snap_date:4:2}" +%s 2>/dev/null) || continue
+            cutoff_epoch=$(date -d '4 weeks ago' +%s)
+            if (( snap_epoch < cutoff_epoch )); then
+                log "Deleting old snapshot: $dir"
+                rclone purge "${SNAPSHOT_BASE}/${dir}" || true
+            fi
+        done
+    fi
+fi
+
+# Prune old logs (keep last 30)
+if ls "$LOG_DIR"/backup-*.log &>/dev/null; then
+    ls -t "$LOG_DIR"/backup-*.log | tail -n +31 | xargs rm -f 2>/dev/null || true
+fi
+
+log "=== Backup completed ==="

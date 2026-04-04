@@ -1,0 +1,89 @@
+# Build artifacts & dependencies
+node_modules/
+target/
+dist/
+build/
+__pycache__/
+*.pyc
+.eggs/
+*.egg-info/
+.venv/
+venv/
+
+# Caches
+.cache/
+.npm/
+.nx/
+.pnpm-store/
+.turbo/
+.thumbnails/
+baloo/
+.cargo/registry/
+.cargo/git/
+
+# Test & tool caches
+.coverage
+htmlcov/
+.nyc_output/
+.tox/
+.pytest_cache/
+.mypy_cache/
+
+# Version control (repos are on GitHub — clone fresh on restore)
+.git/
+
+# OS & desktop junk
+.Trash*/
+Thumbs.db
+.DS_Store
+*.swp
+*.swo
+*~
+*.tmp
+*.temp
+*.log
+
+# Compiled objects
+*.o
+*.so
+*.a
+
+# IDE metadata
+.idea/
+*.iml
+
+# pCloud internal
+.pcloud/
+
+# Open source (all on GitHub, no local-only work)
+Code/open-source/
+
+# Browser caches (keep profiles/bookmarks, skip bulk cache)
+Cache/
+Code Cache/
+Service Worker/
+GrShaderCache/
+GraphiteDawnCache/
+GPUCache/
+DawnGraphiteCache/
+component_crx_cache/
+extensions_crx_cache/
+BrowserMetrics*/
+Crash Reports/
+ShaderCache/
+
+# ~/.local/share exclusions (reinstallable/ephemeral)
+flatpak/
+pnpm/
+Trash/
+claude/
+recently-used.xbel
+
+# Secrets — NEVER back these up off-machine
+id_ed25519
+id_rsa
+id_ecdsa
+id_dsa
+.env
+.env.local
+.env.*.local

@@ -8,7 +8,7 @@ Polyglot scripts and tools for Pop!_OS.
 ./install
 ```
 
-Installs dependencies, builds the COSMIC app, and installs everything. One command.
+Installs dependencies and symlinks scripts. One command.
 
 ## Tools
 
@@ -33,10 +33,27 @@ After each wipe:
 
 Only targets USB devices. Refuses to touch system drives.
 
-### cosmic-clean-usb
+### mermaid
 
-COSMIC desktop GUI for the same USB management. Built with libcosmic. Installed by `./install`.
+Workflow tool for Mermaid diagrams — generate HTML previews, export to SVG/PNG, or scaffold new projects.
 
-Search "Clean USB" in the app launcher, or run `cosmic-clean-usb`.
+```bash
+mermaid -html              # generate index.html from .mmd file in current dir
+mermaid -export            # generate SVG and PNG from .mmd file
+mermaid -create NAME       # create a new project folder with a starter .mmd file
+```
 
-No sudo needed — runs as your user. PolicyKit prompts for auth when wiping. Shows all connected USB drives with model, size, and USB version. Per device: Quick Wipe, Secure Wipe, or Open. After wiping, shows results (speeds, integrity) and option to open in file browser. Writes to `~/usb-report.md`.
+### backup
+
+Backs up your system to pCloud via rclone. Excludes build artifacts, caches, secrets, and SSH keys. Skips metered networks automatically.
+
+```bash
+cd backup
+./bang-backup                # run backup
+./bang-backup --dry-run      # preview without uploading
+./bang-backup --force        # override metered network check
+./bang-backup --verbose      # detailed output
+./install.sh               # set up systemd timer (runs 4x daily, catches up after sleep)
+```
+
+See `backup/restore.md` for full system recovery steps.

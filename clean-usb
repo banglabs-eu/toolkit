@@ -37,9 +37,9 @@ progress_bar() {
     empty=$(( width - filled ))
     bar=$(printf '%*s' "$filled" '' | tr ' ' '#')
     bar+=$(printf '%*s' "$empty" '' | tr ' ' '-')
-    printf "\r  ${GREEN}%-20s${RESET} [${bar}] %3d%%" "$label" "$pct"
+    printf "\r  ${GREEN}%-20s${RESET} [${bar}] %3d%%" "$label" "$pct" >&2
     if [[ "$current" -eq "$total" ]]; then
-        echo ""
+        echo "" >&2
     fi
 }
 
@@ -85,19 +85,19 @@ ensure_mounted() {
     local dev="$1"
     local part mount_point label
 
-    part=$(lsblk -npo NAME "$dev" | tail -n +2 | head -1)
+    part=$(lsblk -lnpo NAME "$dev" | tail -n +2 | head -1)
     if [[ -z "$part" ]]; then
         echo ""
         return
     fi
 
-    mount_point=$(lsblk -npo MOUNTPOINT "$part" 2>/dev/null | xargs)
+    mount_point=$(lsblk -lnpo MOUNTPOINT "$part" 2>/dev/null | xargs || true)
     if [[ -n "$mount_point" ]]; then
         echo "$mount_point"
         return
     fi
 
-    label=$(lsblk -npo LABEL "$part" 2>/dev/null | xargs)
+    label=$(lsblk -lnpo LABEL "$part" 2>/dev/null | xargs || true)
     label="${label:-USB}"
     mount_point="${MOUNT_BASE}/${label}"
     mkdir -p "$mount_point"
@@ -110,20 +110,42 @@ open_in_browser() {
     disown
 }
 
+quick_bench() {
+    local mount_point="$1"
+    local test_file="${mount_point}/.cleanusb_qbench"
+    local write_speed read_speed
+    write_speed=$(dd if=/dev/zero of="$test_file" bs=1M count=8 conv=fsync 2>&1 | \
+        grep -oP '[\d.]+ [MG]B/s' | tail -1 || true)
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    read_speed=$(dd if="$test_file" of=/dev/null bs=1M count=8 2>&1 | \
+        grep -oP '[\d.]+ [MG]B/s' | tail -1 || true)
+    rm -f "$test_file"
+    echo "${write_speed:-N/A}|${read_speed:-N/A}"
+}
+
 show_device() {
     local dev="$1"
-    local size model usb_ver
+    local size model usb_ver mount_point bench write_speed read_speed
     size=$(lsblk -dnpo SIZE "$dev" | xargs)
     model=$(lsblk -dnpo MODEL "$dev" | xargs)
     usb_ver=$(get_usb_version "$dev")
 
     echo -e "  ${BOLD}${model:-unknown}${RESET} — ${size}, ${usb_ver} ${DIM}(${dev})${RESET}"
     lsblk -po NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT "$dev" | tail -n +2 | sed 's/^/    /'
+
+    mount_point=$(ensure_mounted "$dev")
+    if [[ -n "$mount_point" ]]; then
+        printf "    Benchmarking..."
+        bench=$(quick_bench "$mount_point")
+        write_speed="${bench%%|*}"
+        read_speed="${bench##*|}"
+        printf "\r    ${GREEN}Write: %-12s Read: %-12s${RESET}\n" "$write_speed" "$read_speed"
+    fi
 }
 
 unmount_device() {
     local dev="$1"
-    for part in $(lsblk -npo NAME "$dev" | tail -n +2); do
+    for part in $(lsblk -lnpo NAME "$dev" | tail -n +2); do
         if mountpoint -q "$(lsblk -npo MOUNTPOINT "$part" 2>/dev/null)" 2>/dev/null; then
             umount "$part" && echo "  Unmounted $part"
         fi
@@ -146,7 +168,7 @@ benchmark_device() {
     sync
     # Get write speed from a single timed pass
     write_speed=$(dd if=/dev/zero of="$test_file" bs=1M count=$count conv=fsync 2>&1 | \
-        grep -oP '[\d.]+ [MG]B/s' | tail -1)
+        grep -oP '[\d.]+ [MG]B/s' | tail -1 || true)
 
     # Clear cache before read test
     echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
@@ -159,7 +181,7 @@ benchmark_device() {
     # Get read speed from a single timed pass
     echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
     read_speed=$(dd if="$test_file" of=/dev/null bs=1M count=$count 2>&1 | \
-        grep -oP '[\d.]+ [MG]B/s' | tail -1)
+        grep -oP '[\d.]+ [MG]B/s' | tail -1 || true)
 
     rm -f "$test_file"
 
@@ -197,10 +219,10 @@ verify_integrity() {
     rm -f "$test_file"
 
     if [[ "$checksum_src" == "$checksum_dst" ]]; then
-        info "  Integrity PASSED (md5: ${checksum_src:0:12}...)"
+        info "  Integrity PASSED (md5: ${checksum_src:0:12}...)" >&2
         echo "PASS"
     else
-        warn "  Integrity FAILED! (wrote: ${checksum_src}, read: ${checksum_dst})"
+        warn "  Integrity FAILED! (wrote: ${checksum_src}, read: ${checksum_dst})" >&2
         echo "FAIL"
     fi
 }
@@ -326,11 +348,11 @@ wipe_device() {
     echo -e "  Mounted at:  ${mount_point}"
     echo ""
 
-    read -rp "Open in file browser? [y/N]: " open_answer
-    if [[ "${open_answer,,}" == "y" ]]; then
-        open_in_browser "$mount_point"
-        info "Opened ${mount_point} in file browser."
-    fi
+    # Unmount and eject
+    info "Ejecting ${dev}..."
+    umount "$mount_point" 2>/dev/null || true
+    eject "$dev" 2>/dev/null || true
+    info "Ejected. Safe to remove."
 }
 
 # --- Direct mode (with arguments) ---
@@ -361,18 +383,16 @@ if [[ -n "${1:-}" ]]; then
             show_device "$DEVICE"
             echo ""
             warn "ALL DATA will be SECURELY WIPED (full zero pass)."
-            echo ""
-            read -rp "Type YES to confirm: " confirm
-            [[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 0; }
+            read -rp "  Continue? [Y/n]: " confirm
+            [[ "${confirm,,}" == "n" ]] && { echo "Aborted."; exit 0; }
             wipe_device "$DEVICE" true
             ;;
         wipe)
             show_device "$DEVICE"
             echo ""
             warn "ALL DATA will be permanently destroyed."
-            echo ""
-            read -rp "Type YES to confirm: " confirm
-            [[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 0; }
+            read -rp "  Continue? [Y/n]: " confirm
+            [[ "${confirm,,}" == "n" ]] && { echo "Aborted."; exit 0; }
             wipe_device "$DEVICE" false
             ;;
     esac
@@ -397,6 +417,9 @@ echo -e "${BOLD}USB drives:${RESET}"
 echo ""
 
 for dev in "${USB_DEVICES[@]}"; do
+    # Skip devices that are no longer present (e.g. ejected)
+    [[ -b "$dev" ]] || continue
+
     show_device "$dev"
     echo ""
     echo -e "  ${BOLD}[w]${RESET} Wipe (quick)    ${BOLD}[s]${RESET} Secure wipe    ${BOLD}[o]${RESET} Open in file browser    ${BOLD}[enter]${RESET} Skip"
@@ -405,8 +428,8 @@ for dev in "${USB_DEVICES[@]}"; do
     case "${action,,}" in
         w)
             warn "  ALL DATA on this drive will be permanently destroyed."
-            read -rp "  Type YES to confirm: " confirm
-            if [[ "$confirm" == "YES" ]]; then
+            read -rp "  Continue? [Y/n]: " confirm
+            if [[ "${confirm,,}" != "n" ]]; then
                 wipe_device "$dev" false
             else
                 echo "  Skipped."
@@ -414,8 +437,8 @@ for dev in "${USB_DEVICES[@]}"; do
             ;;
         s)
             warn "  ALL DATA will be SECURELY WIPED (full zero pass). This will take a while."
-            read -rp "  Type YES to confirm: " confirm
-            if [[ "$confirm" == "YES" ]]; then
+            read -rp "  Continue? [Y/n]: " confirm
+            if [[ "${confirm,,}" != "n" ]]; then
                 wipe_device "$dev" true
             else
                 echo "  Skipped."
@@ -439,4 +462,3 @@ done
 
 info "All done!"
 echo -e "  Report: ${BOLD}${REPORT_FILE}${RESET}"
-echo -e "  Safely eject with: ${BOLD}sudo eject /dev/sdX${RESET}"

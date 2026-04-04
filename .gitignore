@@ -24,3 +24,6 @@ target/
 # IDE
 .vscode/
 .idea/
+
+# Backup logs
+backup/logs/
