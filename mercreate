@@ -49,5 +49,5 @@ HTMLEOF
 echo "Built ${base}.html"
 
 # PNG
-mmdc -i "$mmd" -o "${base}.png" -p ~/.mermaidcli.json
+mmdc -i "$mmd" -o "${base}.png" -p ~/.mermaidcli.json -s 4
 echo "Built ${base}.png"

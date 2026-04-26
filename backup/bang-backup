@@ -152,7 +152,8 @@ sync_file "ssh-config" "$HOME/.ssh/config"     "dotfiles/ssh_config"
 # App configs
 # App configs (cherry-picked — skip browsers, pcloud, etc.)
 for dir in cosmic git kitty wezterm Code libreoffice rclone \
-           qBittorrent qt5ct qt6ct gtk-3.0 gtk-4.0 dconf autostart pulse; do
+           qBittorrent qt5ct qt6ct gtk-3.0 gtk-4.0 dconf autostart pulse \
+           systemd/user; do
     sync_source "config/$dir" "$HOME/.config/$dir" "config/$dir"
 done
 

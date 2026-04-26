@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REMOTE="pcloud"
+SRC="${REMOTE}:"
+DEST="/media/abk/External/Backups/pCloud"
+QUARANTINE_BASE="/media/abk/External/Backups/pCloud-deleted"
+QUARANTINE="${QUARANTINE_BASE}/$(date +%Y-%m-%d-%H%M%S)"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG_DIR="${SCRIPT_DIR}/logs"
+LOG_FILE="${LOG_DIR}/pcloud-archive-$(date +%Y%m%d-%H%M%S).log"
+
+DRY_RUN=false
+SKIP_PROMPT=false
+LOG_LEVEL="NOTICE"
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run)    DRY_RUN=true ;;
+        --yes|-y)     SKIP_PROMPT=true ;;
+        --verbose|-v) LOG_LEVEL="INFO" ;;
+        --debug)      LOG_LEVEL="DEBUG" ;;
+        -h|--help)
+            cat <<EOF
+Usage: pcloud-archive [flags]
+  --dry-run     Preview only, no transfers
+  -y, --yes     Skip confirmation prompt
+  -v, --verbose Log every file (INFO)   — default is summary only (NOTICE)
+  --debug       Log all API traffic (DEBUG, very large)
+  -h, --help    This message
+EOF
+            exit 0 ;;
+        *) echo "Unknown flag: $arg (try --help)"; exit 1 ;;
+    esac
+done
+
+# Pre-flight
+command -v rclone >/dev/null || { echo "rclone not installed"; exit 1; }
+rclone listremotes | grep -q "^${REMOTE}:$" || { echo "remote '${REMOTE}' not configured"; exit 1; }
+[[ -d /media/abk/External ]] || { echo "external drive not mounted at /media/abk/External"; exit 1; }
+mountpoint -q /media/abk/External || { echo "/media/abk/External exists but is not a mount point"; exit 1; }
+
+mkdir -p "$DEST" "$QUARANTINE_BASE" "$LOG_DIR"
+
+FLAGS=(
+    --backup-dir "$QUARANTINE"
+    --transfers=4
+    --checkers=8
+    --retries=3
+    --low-level-retries=10
+    --check-first
+    --progress
+    --log-file="$LOG_FILE"
+    --log-level="$LOG_LEVEL"
+)
+$DRY_RUN && FLAGS+=(--dry-run)
+
+mark() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*" >> "$LOG_FILE"; }
+
+echo "=== pCloud archive ==="
+echo "Source:     ${SRC}"
+echo "Dest:       ${DEST}"
+echo "Quarantine: ${QUARANTINE}"
+echo "Log:        ${LOG_FILE}"
+echo
+
+echo "Remote quota:"
+rclone about "$SRC" 2>&1 || echo "  (could not fetch quota — proceeding anyway)"
+echo
+echo "Local free space:"
+df -h "$DEST" | tail -1
+echo
+
+if ! $SKIP_PROMPT; then
+    read -rp "Continue? [Y/n] " ans
+    [[ "$ans" =~ ^[nN] ]] && { echo "aborted"; exit 0; }
+fi
+
+mark "=== started (level=${LOG_LEVEL}${DRY_RUN:+, dry-run}) ==="
+trap 'mark "=== interrupted (exit=$?) ==="' INT TERM
+RC=0
+rclone sync "$SRC" "$DEST" "${FLAGS[@]}" || RC=$?
+mark "=== finished (exit=${RC}) ==="
+trap - INT TERM
+
+# Tidy up empty quarantine dir if nothing was removed/replaced this run
+if [[ ! -d "$QUARANTINE" ]] || [[ -z "$(ls -A "$QUARANTINE" 2>/dev/null)" ]]; then
+    [[ -d "$QUARANTINE" ]] && rmdir "$QUARANTINE"
+    echo "No deletions/replacements this run."
+else
+    echo "Files moved to quarantine: $QUARANTINE"
+fi
+
+# Prune logs (keep last 30)
+ls -t "$LOG_DIR"/pcloud-archive-*.log 2>/dev/null | tail -n +31 | xargs -r rm -f
+
+echo "=== Done ==="
