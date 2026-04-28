@@ -3,9 +3,8 @@ set -euo pipefail
 
 REMOTE="pcloud"
 SRC="${REMOTE}:"
-DEST="/media/abk/External/Backups/pCloud"
-QUARANTINE_BASE="/media/abk/External/Backups/pCloud-deleted"
-QUARANTINE="${QUARANTINE_BASE}/$(date +%Y-%m-%d-%H%M%S)"
+MARKER_REL="Backups/.bang-pcloud-archive"
+# DEST / QUARANTINE_BASE / QUARANTINE are set after mount-point discovery below
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="${SCRIPT_DIR}/logs"
@@ -37,8 +36,29 @@ done
 # Pre-flight
 command -v rclone >/dev/null || { echo "rclone not installed"; exit 1; }
 rclone listremotes | grep -q "^${REMOTE}:$" || { echo "remote '${REMOTE}' not configured"; exit 1; }
-[[ -d /media/abk/External ]] || { echo "external drive not mounted at /media/abk/External"; exit 1; }
-mountpoint -q /media/abk/External || { echo "/media/abk/External exists but is not a mount point"; exit 1; }
+MOUNT="${PCLOUD_ARCHIVE_MOUNT:-}"
+if [[ -z "$MOUNT" ]]; then
+    matches=()
+    while IFS= read -r mp; do
+        [[ -f "${mp}/${MARKER_REL}" ]] && matches+=("$mp")
+    done < <(findmnt -rno TARGET --real 2>/dev/null)
+
+    case "${#matches[@]}" in
+        0) echo "no mounted drive contains the marker '${MARKER_REL}'"
+           echo "plug in the backup drive, or run once on a fresh drive to set it up:"
+           echo "  mkdir -p /path/to/drive/Backups && touch /path/to/drive/${MARKER_REL}"
+           exit 1 ;;
+        1) MOUNT="${matches[0]}" ;;
+        *) echo "multiple drives carry the marker '${MARKER_REL}':"
+           printf '  %s\n' "${matches[@]}"
+           echo "unplug all but the intended one, or set PCLOUD_ARCHIVE_MOUNT explicitly"
+           exit 1 ;;
+    esac
+fi
+
+DEST="${MOUNT}/Backups/pCloud"
+QUARANTINE_BASE="${MOUNT}/Backups/pCloud-deleted"
+QUARANTINE="${QUARANTINE_BASE}/$(date +%Y-%m-%d-%H%M%S)"
 
 mkdir -p "$DEST" "$QUARANTINE_BASE" "$LOG_DIR"
 
@@ -72,7 +92,12 @@ df -h "$DEST" | tail -1
 echo
 
 if ! $SKIP_PROMPT; then
-    read -rp "Continue? [Y/n] " ans
+    if [[ -z "$(ls -A "$DEST" 2>/dev/null)" ]]; then
+        PROMPT="Start new sync? [Y/n] "
+    else
+        PROMPT="Resume sync? Files already on the destination will be skipped. [Y/n] "
+    fi
+    read -rp "$PROMPT" ans
     [[ "$ans" =~ ^[nN] ]] && { echo "aborted"; exit 0; }
 fi
 
