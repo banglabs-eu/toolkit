@@ -1,35 +1,59 @@
 #!/bin/bash
 set -euo pipefail
 
-# mercreate - Generate HTML and PNG from a .mmd mermaid file
-# Usage: mercreate FILE.mmd
+# mercreate - Render Mermaid .mmd files to HTML + PNG
+#
+# For Claude / agents reading this file:
+#   Use mercreate to turn Mermaid diagram sources (.mmd) into viewable
+#   artifacts. It produces a self-contained HTML (loads mermaid.js from
+#   CDN) and a PNG (via mermaid-cli / mmdc).
+#
+#   Invocation:
+#     mercreate path/to/diagram.mmd     # render a single file
+#     mercreate path/to/dir/            # render every *.mmd in DIR
+#
+#   Outputs land next to each input as NAME.v1.{html,png}. If outputs
+#   already exist, the version auto-bumps (v2, v3, ...) so prior renders
+#   are never overwritten.
+#
+#   On failure (mmdc errors or produces no/empty PNG), partial HTML/PNG
+#   are removed and the full error is appended to ./error.log (cwd).
+#   Terminal output is terse: "Built NAME.vN.{html,png}" on success,
+#   "Error: PATH (see error.log)" on failure. Other files in a batch
+#   continue processing.
+#
+#   Requires: mmdc (mermaid-cli), config at ~/.mermaidcli.json
 
 if [ -z "${1:-}" ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
   echo "Usage: mercreate FILE.mmd"
+  echo "       mercreate DIR"
   echo ""
-  echo "Generates HTML and PNG in the same directory as the input file."
-  echo "Output files are named: NAME.v1.{html,png}, NAME.v2.{html,png}, etc."
+  echo "Renders Mermaid diagrams to HTML + PNG next to the source file."
+  echo ""
+  echo "  - Outputs: NAME.v1.{html,png}, auto-bumping (v2, v3, ...)"
+  echo "    so existing renders are never overwritten."
+  echo "  - DIR mode processes every *.mmd in the given directory."
+  echo "  - On failure: partial outputs are removed, full error is"
+  echo "    appended to ./error.log, terminal shows only the file name."
+  echo "  - Requires: mmdc (mermaid-cli), config at ~/.mermaidcli.json"
   exit 0
 fi
 
-mmd="$(realpath "$1")"
-if [ ! -f "$mmd" ]; then
-  echo "Error: $mmd not found"
-  exit 1
-fi
+ERROR_LOG="${PWD}/error.log"
 
-dir="$(dirname "$mmd")"
-name="$(basename "${mmd%.mmd}")"
+process() {
+  local mmd="$1"
+  local dir name v base
+  dir="$(dirname "$mmd")"
+  name="$(basename "${mmd%.mmd}")"
 
-# Find next version number
-v=1
-while [ -e "${dir}/${name}.v${v}.html" ] || [ -e "${dir}/${name}.v${v}.png" ]; do
-  v=$((v + 1))
-done
-base="${dir}/${name}.v${v}"
+  v=1
+  while [ -e "${dir}/${name}.v${v}.html" ] || [ -e "${dir}/${name}.v${v}.png" ]; do
+    v=$((v + 1))
+  done
+  base="${dir}/${name}.v${v}"
 
-# HTML
-cat > "${base}.html" << HTMLEOF
+  if ! cat > "${base}.html" << HTMLEOF
 <html>
   <head>
     <title>${name}</title>
@@ -46,8 +70,54 @@ $(cat "$mmd")
   </body>
 </html>
 HTMLEOF
-echo "Built ${base}.html"
+  then
+    rm -f "${base}.html"
+    return 1
+  fi
+  echo "Built ${name}.v${v}.html"
 
-# PNG
-mmdc -i "$mmd" -o "${base}.png" -p ~/.mermaidcli.json -s 4
-echo "Built ${base}.png"
+  if ! mmdc -i "$mmd" -o "${base}.png" -p ~/.mermaidcli.json -s 4 || [ ! -s "${base}.png" ]; then
+    echo "mmdc failed to produce ${name}.v${v}.png" >&2
+    rm -f "${base}.html" "${base}.png"
+    return 1
+  fi
+  echo "Built ${name}.v${v}.png"
+}
+
+run_one() {
+  local f="$1"
+  local outfile
+  outfile=$(mktemp)
+  if process "$f" >"$outfile" 2>&1; then
+    cat "$outfile"
+    rm -f "$outfile"
+  else
+    {
+      echo "=== $(date -Iseconds) | $f ==="
+      cat "$outfile"
+      echo ""
+    } >> "$ERROR_LOG"
+    echo "Error: $f (see $ERROR_LOG)"
+    rm -f "$outfile"
+    return 1
+  fi
+}
+
+input="$(realpath "$1")"
+
+if [ -d "$input" ]; then
+  shopt -s nullglob
+  files=("$input"/*.mmd)
+  if [ ${#files[@]} -eq 0 ]; then
+    echo "No .mmd files found in $input"
+    exit 1
+  fi
+  for f in "${files[@]}"; do
+    run_one "$f" || true
+  done
+elif [ -f "$input" ]; then
+  run_one "$input" || true
+else
+  echo "Error: $input not found"
+  exit 1
+fi
