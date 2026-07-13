@@ -1,14 +1,6 @@
 # toolkit
 
-Polyglot scripts and tools for Pop!_OS.
-
-## Setup
-
-```bash
-./install
-```
-
-Installs dependencies and symlinks scripts. One command.
+Tools for Ubuntu based machines.
 
 ## Tools
 
