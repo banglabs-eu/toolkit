@@ -1,0 +1,1042 @@
+#!/usr/bin/env python3
+"""
+bravia-ready — convert a movie library into files a Sony Bravia plays off USB.
+
+    bravia-ready --list                 # show what would be done, touch nothing
+    bravia-ready                        # convert everything not already done
+    bravia-ready "Spy Game (2001)"      # convert one title (dir name or path)
+    bravia-ready --limit 2              # work through the queue two films at a time
+
+Target format (established by testing on an actual set, not from documentation):
+
+    container   MP4 with +faststart
+    video       H.264 — HEVC is refused outright
+    audio       AAC-LC, 48 kHz, stereo — AC3 refused, 96 kHz plays silently
+    subtitles   sidecar .srt in UTF-16LE — UTF-8 renders as boxes
+    naming      Title (Year).mp4 + Title (Year).srt, identical basenames
+
+Source files are read straight off the pCloud FUSE mount, encoded to a local
+scratch directory, and only copied up to the destination once complete and
+verified. Nothing partial ever lands in the destination, so an interrupted run
+is resumed by simply running the command again.
+
+Requires: ffmpeg, ffprobe. Uses VAAPI when /dev/dri/renderD128 is present.
+"""
+
+import argparse
+import concurrent.futures as cf
+import io
+import json
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+try:
+    import numpy as np
+    from PIL import Image, ImageOps
+    HAVE_OCR_DEPS = True
+except ImportError:                       # OCR is optional; everything else works
+    HAVE_OCR_DEPS = False
+
+SOURCE = Path("/home/abk/pCloudDrive/Video/Movies")
+DEST = Path("/home/abk/pCloudDrive/Bravia-Ready")
+WORK = Path.home() / ".cache" / "bravia-ready"
+
+VIDEO_EXT = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".wmv", ".ts", ".m2ts"}
+# Directories holding bonus material rather than the feature itself.
+EXTRA_DIRS = {"featurettes", "extras", "bonus", "samples", "sample", "trailers"}
+# Text-based subtitle codecs. Image formats (PGS, VOBSUB) cannot become .srt.
+TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "mov_text", "text", "webvtt"}
+# Scene-release subtitle files open with caption cards advertising the site.
+SUB_ADVERTS = ("YTS", "YIFY", "DOWNLOADED FROM", "OPENSUBTITLES", "EXPLOSIVESKULL")
+
+RED, GREEN, YELLOW, BLUE, BOLD, DIM, RESET = (
+    "\033[0;31m", "\033[0;32m", "\033[1;33m", "\033[0;34m",
+    "\033[1m", "\033[2m", "\033[0m",
+)
+if not sys.stdout.isatty():
+    RED = GREEN = YELLOW = BLUE = BOLD = DIM = RESET = ""
+
+# ffmpeg writes progress straight to the terminal, so our own output has to be
+# unbuffered too or the two interleave out of order when piped to a log.
+sys.stdout.reconfigure(line_buffering=True)
+
+
+def die(msg):
+    print(f"{RED}error: {msg}{RESET}", file=sys.stderr)
+    sys.exit(1)
+
+
+def warn(msg):
+    print(f"{YELLOW}  ! {msg}{RESET}")
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
+        n /= 1024
+
+
+def rel(path, root):
+    """Path relative to the library root, or the bare name if it sits outside."""
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        return path.name
+
+
+def hms(seconds):
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+# --- probing -----------------------------------------------------------------
+
+
+def ffprobe(path):
+    """Full stream + format metadata for a file, or None if unreadable."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_streams", "-show_format",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=300, check=True,
+        ).stdout
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return None
+
+
+def streams_of(meta, kind):
+    return [s for s in meta.get("streams", []) if s.get("codec_type") == kind]
+
+
+def lang_of(stream):
+    return (stream.get("tags") or {}).get("language", "").lower()
+
+
+def title_of(stream):
+    return ((stream.get("tags") or {}).get("title") or "").lower()
+
+
+def is_default(stream):
+    return bool((stream.get("disposition") or {}).get("default"))
+
+
+# --- discovery ---------------------------------------------------------------
+
+
+def is_extra(path, root):
+    """True if the file sits under a bonus-material directory, or is a sample."""
+    rel = path.relative_to(root)
+    if any(part.lower() in EXTRA_DIRS for part in rel.parts[:-1]):
+        return True
+    return "sample" in path.stem.lower()
+
+
+def find_feature(movie_dir):
+    """The main feature is the largest video file that is not bonus material."""
+    candidates = [
+        p for p in movie_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in VIDEO_EXT and not is_extra(p, movie_dir)
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_size)
+
+
+def clean_title(name):
+    """Reduce a release directory name to `Title (Year)`.
+
+    Everything after the year is release/edition noise:
+        High and Low (1963) Criterion + Extras  ->  High and Low (1963)
+    With no year, fall back to the name with bracketed tags stripped.
+    """
+    m = re.search(r"\((19|20)\d{2}\)", name)
+    title = name[: m.end()] if m else re.sub(r"[\[(][^\])]*[\])]", "", name)
+    title = re.sub(r"\s+", " ", title).strip(" .-_")
+    # exFAT rejects these outright; strip rather than let the copy fail later.
+    return re.sub(r'[\\/:*?"<>|]', "", title)
+
+
+def score_subtitle(path):
+    """Rank a candidate .srt. Higher is better; None means reject."""
+    name = path.name.lower()
+    if re.search(r"\b(forced|sdh|commentary|sign|song)\b", name):
+        return None  # partial or non-dialogue tracks
+    score = 0
+    if re.search(r"\b(english|eng|en)\b", name):
+        score += 10
+    if path.stat().st_size > 5000:
+        score += 1
+    return score
+
+
+def find_subtitle(movie_dir, feature):
+    """Best external .srt for a feature, or None.
+
+    Preference: exact basename match, then anything alongside the film, then
+    a Subs/ directory — English-tagged first, largest as the tiebreak.
+    """
+    exact = feature.with_suffix(".srt")
+    if exact.is_file():
+        return exact
+
+    candidates = [
+        p for p in movie_dir.rglob("*.srt")
+        if p.is_file() and not is_extra(p, movie_dir)
+    ]
+    scored = []
+    for p in candidates:
+        s = score_subtitle(p)
+        if s is None:
+            continue
+        # Prefer files sitting next to the film over ones nested in Subs/.
+        depth_bonus = 2 if p.parent == feature.parent else 0
+        scored.append((s + depth_bonus, p.stat().st_size, p))
+    if not scored:
+        return None
+    return max(scored)[2]
+
+
+def pick_audio(meta, override=None):
+    """Index (within audio streams) of the track to use.
+
+    Defaults to the stream the file itself marks default, which on a foreign
+    film is the original language rather than a dub. Never guesses English.
+    """
+    audio = streams_of(meta, "audio")
+    if not audio:
+        return None
+    if override is not None:
+        if override >= len(audio):
+            die(f"--audio {override} out of range, file has {len(audio)} audio streams")
+        return override
+    for i, s in enumerate(audio):
+        if is_default(s):
+            return i
+    return 0
+
+
+def pick_image_sub_stream(meta):
+    """Index of the best PGS track to OCR, or None. VOBSUB is not handled."""
+    subs = streams_of(meta, "subtitle")
+    best, best_score = None, -1
+    for i, s in enumerate(subs):
+        if s.get("codec_name") != "hdmv_pgs_subtitle":
+            continue
+        text = lang_of(s) + " " + title_of(s)
+        if re.search(r"forced|commentary|sign|song", text):
+            continue  # forced tracks caption only foreign signage, not dialogue
+        score = 10 if lang_of(s) in ("eng", "en") else 0
+        if is_default(s):
+            score += 2
+        if score > best_score:
+            best, best_score = i, score
+    return best
+
+
+def pick_sub_stream(meta):
+    """Index (within subtitle streams) of the best embedded text track, or None."""
+    subs = streams_of(meta, "subtitle")
+    best, best_score = None, -1
+    for i, s in enumerate(subs):
+        if s.get("codec_name") not in TEXT_SUBS:
+            continue  # image-based, cannot be turned into .srt
+        text = lang_of(s) + " " + title_of(s)
+        if re.search(r"forced|sdh|commentary|sign|song", text):
+            continue
+        score = 0
+        if lang_of(s) in ("eng", "en"):
+            score += 10
+        if is_default(s):
+            score += 2
+        if score > best_score:
+            best, best_score = i, score
+    return best
+
+
+# --- subtitles ---------------------------------------------------------------
+
+
+def write_utf16_srt(src, dest):
+    """Rewrite an .srt as UTF-16LE with BOM, renumbering and dropping adverts.
+
+    The set decodes .srt as UTF-16 unconditionally. Given UTF-8 it reads the
+    bytes in pairs — 'Th' becomes U+6854 — so every two characters collapse
+    into one missing-glyph box. Plain-ASCII English is byte-identical across
+    UTF-8, cp1252 and latin-1, which is why trying "other encodings" appears
+    to change nothing. Only genuine UTF-16 fixes it.
+    """
+    raw = Path(src).read_bytes()
+    # UTF-16 is only attempted when a BOM says so. Tried speculatively it would
+    # "succeed" on almost any even-length input, decoding cp1252 bytes into the
+    # same garbage CJK the TV produces — the bug this function exists to avoid.
+    if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        encodings = ("utf-16", "utf-8-sig", "cp1252", "latin-1")
+    else:
+        encodings = ("utf-8-sig", "cp1252", "latin-1")
+    for enc in encodings:
+        try:
+            text = raw.decode(enc)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+        if "-->" in text:
+            break
+    else:
+        return None
+
+    blocks = [b for b in re.split(r"\n\s*\n", text.replace("\r\n", "\n").strip()) if b.strip()]
+    keep = [b for b in blocks if not any(w in b.upper() for w in SUB_ADVERTS)]
+
+    cues = []
+    for i, b in enumerate(keep, 1):
+        parts = b.split("\n", 1)
+        if len(parts) < 2 or "-->" not in b:
+            continue  # not a well-formed cue; drop it rather than emit garbage
+        cues.append(f"{i}\n{parts[1]}")
+    if not cues:
+        return None
+
+    out = "\n\n".join(cues) + "\n"
+    Path(dest).write_bytes(b"\xff\xfe" + out.replace("\n", "\r\n").encode("utf-16-le"))
+    return len(cues), len(blocks) - len(keep)
+
+
+# --- image-based subtitles ---------------------------------------------------
+#
+# Criterion and other Blu-ray rips often carry only PGS: bitmaps, not text, so
+# there is nothing to convert into an .srt. Left alone, a foreign-language film
+# arrives on the TV with no subtitles at all. These functions decode the PGS
+# bitmaps and OCR them back into text.
+
+
+def _parse_sup(path):
+    """Split a PGS .sup into display sets. Returns [{pts, n, objs, pal}]."""
+    data = Path(path).read_bytes()
+    palettes, objects, sets = {}, {}, []
+    pending, cur = None, {"objs": [], "pal": 0}
+    o = 0
+    while o + 13 <= len(data):
+        if data[o:o + 2] != b"PG":
+            break
+        pts = struct.unpack(">I", data[o + 2:o + 6])[0] / 90000.0
+        stype = data[o + 10]
+        slen = struct.unpack(">H", data[o + 11:o + 13])[0]
+        payload = data[o + 13:o + 13 + slen]
+        o += 13 + slen
+
+        if stype == 0x16:                                    # presentation
+            if len(payload) < 11:
+                continue
+            cur = {"pts": pts, "objs": [], "pal": payload[9], "n": payload[10]}
+            p = 11
+            for _ in range(payload[10]):
+                if p + 8 > len(payload):
+                    break
+                oid = struct.unpack(">H", payload[p:p + 2])[0]
+                cropped = payload[p + 3]
+                x, y = struct.unpack(">HH", payload[p + 4:p + 8])
+                cur["objs"].append({"id": oid, "x": x, "y": y})
+                p += 8 + (8 if cropped & 0x80 else 0)
+        elif stype == 0x14:                                  # palette
+            tbl = palettes.setdefault(payload[0], np.zeros((256, 2), dtype=np.uint8))
+            for i in range(2, len(payload) - 4, 5):
+                idx, Y, _cr, _cb, A = payload[i:i + 5]
+                tbl[idx] = (Y, A)
+        elif stype == 0x15:                                  # object bitmap
+            oid = struct.unpack(">H", payload[0:2])[0]
+            seq = payload[3]
+            if seq & 0x80:
+                w, h = struct.unpack(">HH", payload[7:11])
+                pending = {"id": oid, "w": w, "h": h, "buf": bytearray(payload[11:])}
+            elif pending is not None:
+                pending["buf"] += payload[4:]
+            if pending is not None and seq & 0x40:           # final fragment
+                objects[pending["id"]] = pending
+                pending = None
+        elif stype == 0x80:                                  # end of display set
+            sets.append({
+                "pts": cur.get("pts", pts),
+                "n": cur.get("n", 0),
+                "objs": [dict(ob, **objects[ob["id"]])
+                         for ob in cur["objs"] if ob["id"] in objects],
+                "pal": palettes.get(cur.get("pal", 0)),
+            })
+    return sets
+
+
+def _decode_rle(buf, w, h):
+    """PGS run-length encoding -> array of palette indices."""
+    img = np.zeros(w * h, dtype=np.uint8)
+    i, p, row, n = 0, 0, 0, len(buf)
+    while i < n and row < h:
+        b = buf[i]; i += 1
+        if b:
+            run, colour = 1, b
+        else:
+            if i >= n:
+                break
+            b2 = buf[i]; i += 1
+            if b2 == 0:                       # end of line
+                row += 1
+                p = row * w
+                continue
+            if b2 < 0x40:
+                run, colour = b2 & 0x3F, 0
+            elif b2 < 0x80:
+                if i >= n: break
+                run, colour = ((b2 - 0x40) << 8) | buf[i], 0; i += 1
+            elif b2 < 0xC0:
+                if i >= n: break
+                run, colour = b2 - 0x80, buf[i]; i += 1
+            else:
+                if i + 1 >= n: break
+                run = ((b2 - 0xC0) << 8) | buf[i]; i += 1
+                colour = buf[i]; i += 1
+        end = min(p + run, row * w + w, w * h)
+        if end > p:
+            img[p:end] = colour
+        p = end
+    return img.reshape(h, w)
+
+
+def _render(ds):
+    """Compose a display set into a white-page greyscale image, ready for OCR."""
+    pal = ds["pal"]
+    if pal is None or not ds["objs"]:
+        return None
+    boxes = [(ob["x"], ob["y"], ob["x"] + ob["w"], ob["y"] + ob["h"]) for ob in ds["objs"]]
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    canvas = np.full((y1 - y0, x1 - x0), 255, dtype=np.uint8)
+    for ob in ds["objs"]:
+        idx = _decode_rle(ob["buf"], ob["w"], ob["h"])
+        Y = pal[:, 0][idx].astype(np.int16)
+        A = pal[:, 1][idx]
+        # Subtitles are light text with a dark outline over transparency.
+        # Inverting luma puts text near-black and folds the outline into the page.
+        tile = np.where(A > 0, 255 - Y, 255).astype(np.uint8)
+        yy, xx = ob["y"] - y0, ob["x"] - x0
+        region = canvas[yy:yy + ob["h"], xx:xx + ob["w"]]
+        canvas[yy:yy + ob["h"], xx:xx + ob["w"]] = np.minimum(region, tile)
+    img = Image.fromarray(canvas, mode="L")
+    if img.height < 40:  # tesseract reads small type poorly; give it more pixels
+        img = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
+    return ImageOps.expand(img, border=12, fill=255)
+
+
+def _ocr(img):
+    """Run tesseract over one rendered cue and tidy the result."""
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    try:
+        r = subprocess.run(
+            ["tesseract", "stdin", "stdout", "--psm", "6", "-l", "eng"],
+            input=buf.getvalue(), capture_output=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    text = r.stdout.decode("utf-8", "replace")
+    lines = []
+    for ln in text.splitlines():
+        # A vertical bar is nearly always a misread I, and stray form feeds
+        # arrive from tesseract's page handling.
+        ln = ln.replace("|", "I").replace("\f", "").strip()
+        # Italic capital I is the main source of OCR noise in subtitles: it gets
+        # read as a slash ("/t's"), or picks up a phantom exclamation mark
+        # ("I! am"). Neither pattern occurs in real dialogue.
+        ln = re.sub(r"(^|[\s\"'(])/(?=[a-z])", r"\1I", ln)
+        ln = re.sub(r"\bI!(\s+[a-z])", r"I\1", ln)
+        if ln:
+            lines.append(ln)
+    return "\n".join(lines)
+
+
+def _ts(seconds):
+    ms = int(round(seconds * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def ocr_image_subs(feature, index, tmpdir, jobs=4):
+    """Extract PGS stream `index`, OCR it, and write a plain .srt. None on failure."""
+    sup = Path(tmpdir) / "subs.sup"
+    r = subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(feature),
+         "-map", f"0:s:{index}", "-c:s", "copy", "-f", "sup", str(sup)],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0 or not sup.exists() or sup.stat().st_size == 0:
+        return None
+
+    try:
+        sets = _parse_sup(sup)
+    except (struct.error, ValueError, IndexError):
+        return None
+
+    # A display set carrying objects shows a caption; the next set replaces or
+    # clears it, so that timestamp is the caption's end.
+    cues = []
+    for i, ds in enumerate(sets):
+        if ds["n"] <= 0 or not ds["objs"]:
+            continue
+        end = next((s["pts"] for s in sets[i + 1:] if s["pts"] > ds["pts"]),
+                   ds["pts"] + 4.0)
+        cues.append((ds["pts"], end, ds))
+    if not cues:
+        return None
+
+    print(f"  subtitles: OCR of {len(cues)} image cues ", end="", flush=True)
+    rendered = [(_render(ds), st, en) for st, en, ds in cues]
+    todo = [(i, im, st, en) for i, (im, st, en) in enumerate(rendered) if im is not None]
+
+    results = {}
+    with cf.ThreadPoolExecutor(max_workers=jobs) as pool:
+        futures = {pool.submit(_ocr, im): (i, st, en) for i, im, st, en in todo}
+        for k, fut in enumerate(cf.as_completed(futures)):
+            i, st, en = futures[fut]
+            results[i] = (st, en, fut.result())
+            if k % 50 == 0:
+                print(".", end="", flush=True)
+    print()
+
+    out = Path(tmpdir) / "ocr.srt"
+    n = 0
+    with out.open("w", encoding="utf-8") as fh:
+        for i in sorted(results):
+            st, en, text = results[i]
+            if not text:
+                continue
+            n += 1
+            fh.write(f"{n}\n{_ts(st)} --> {_ts(en)}\n{text}\n\n")
+    if n == 0:
+        return None
+    return out
+
+
+def extract_embedded_sub(feature, index, tmpdir):
+    """Pull an embedded text subtitle track out to a temporary .srt."""
+    tmp = Path(tmpdir) / "embedded.srt"
+    r = subprocess.run(
+        ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(feature),
+         "-map", f"0:s:{index}", "-c:s", "srt", str(tmp)],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+        return None
+    return tmp
+
+
+# --- encoding ----------------------------------------------------------------
+
+
+def encoder_available():
+    """Which H.264 encoder to use for sources that need re-encoding.
+
+    ffmpeg is captured into a variable rather than piped into a matcher: piping
+    makes it die of SIGPIPE, which reads as "no GPU" and silently drops to the
+    CPU encoder at a fraction of the speed.
+    """
+    try:
+        listing = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        listing = ""
+    if Path("/dev/dri/renderD128").exists() and "h264_vaapi" in listing:
+        # Presence of the node is not proof the driver can encode; verify once.
+        probe = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-v", "error",
+             "-vaapi_device", "/dev/dri/renderD128",
+             "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25", "-t", "1",
+             "-vf", "format=nv12,hwupload", "-c:v", "h264_vaapi", "-f", "null", "-"],
+            capture_output=True, text=True,
+        )
+        if probe.returncode == 0:
+            return "vaapi"
+    return "cpu"
+
+
+def build_command(feature, meta, out_path, audio_idx, encoder, qp, crf, max_height):
+    vstream = streams_of(meta, "video")[0]
+    vcodec = vstream.get("codec_name", "")
+    width = int(vstream.get("width") or 0)
+    height = int(vstream.get("height") or 0)
+    achan = int(streams_of(meta, "audio")[audio_idx].get("channels") or 2)
+
+    # H.264 beyond 1080p exceeds the level TV decoders implement, so a 4K source
+    # has to come down or it is refused just as HEVC is. The limit is a frame
+    # budget rather than a height: a 3840x1606 scope film scaled to 1080 tall is
+    # still 2582 wide, which busts the same budget. So fit inside a 16:9 box.
+    max_width = round(max_height * 16 / 9 / 2) * 2 if max_height else 0
+    scaling = bool(max_height and (height > max_height or width > max_width))
+    # decrease-only, so a smaller source is never blown up; divisible-by-2
+    # because H.264 chroma subsampling requires even dimensions.
+    scale = (f"scale=w={max_width}:h={max_height}"
+             ":force_original_aspect_ratio=decrease:force_divisible_by=2")
+
+    pre, vopts = [], []
+    if vcodec == "h264" and not scaling:
+        vopts = ["-c:v", "copy"]
+        vnote = "copied (already H.264)"
+    elif encoder == "vaapi":
+        pre = ["-vaapi_device", "/dev/dri/renderD128"]
+        # nv12 also flattens 10-bit sources to 8-bit, which H.264 needs anyway.
+        chain = (f"{scale}," if scaling else "") + "format=nv12,hwupload"
+        vopts = ["-vf", chain, "-c:v", "h264_vaapi", "-qp", str(qp)]
+        vnote = f"re-encode {vcodec} -> H.264 (GPU)"
+    else:
+        vopts = ["-c:v", "libx264", "-crf", str(crf), "-preset", "veryfast",
+                 "-pix_fmt", "yuv420p"]
+        if scaling:
+            vopts = ["-vf", scale] + vopts
+        vnote = f"re-encode {vcodec} -> H.264 (CPU, slow)"
+    if scaling:
+        vnote += f", {width}x{height} scaled into {max_width}x{max_height}"
+
+    # aresample at the end is essential: loudnorm runs at 192 kHz internally,
+    # and without it the encoder inherits that and clamps to AAC's 96 kHz
+    # ceiling. The result is a valid file that plays silently on the TV.
+    loudnorm = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000"
+    if achan >= 6:
+        # The centre channel carries the dialogue, so keep it loud relative to
+        # the rest. LFE is dropped: TV speakers cannot reproduce that band, so
+        # it contributes nothing audible while eating headroom dialogue needs.
+        af = ("pan=stereo|FL=1.0*FC+0.707*FL+0.5*BL|FR=1.0*FC+0.707*FR+0.5*BR,"
+              "acompressor=threshold=-18dB:ratio=3:attack=20:release=250,"
+              + loudnorm)
+        anote = f"{achan}ch downmixed to stereo, dialogue lifted"
+    else:
+        af = loudnorm
+        anote = f"{achan}ch -> stereo, levelled"
+
+    cmd = (["ffmpeg", "-nostdin", "-v", "warning", "-stats", "-y"] + pre
+           + ["-i", str(feature),
+              "-map", "0:v:0", "-map", f"0:a:{audio_idx}",
+              # -dn alone leaves MKV chapters behind as a bin_data stream.
+              "-dn", "-sn", "-map_chapters", "-1"]
+           + vopts
+           + ["-af", af, "-ar", "48000", "-ac", "2", "-c:a", "aac", "-b:a", "192k",
+              "-movflags", "+faststart", str(out_path)])
+    return cmd, vnote, anote
+
+
+def verify(path):
+    """Refuse to ship a file whose audio would play silently on the TV."""
+    sr = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a:0",
+         "-show_entries", "stream=sample_rate", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if sr != "48000":
+        return f"sample rate is {sr or 'unreadable'}, not 48000 — the TV would play this silently"
+    vc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if vc != "h264":
+        return f"video codec is {vc or 'unreadable'}, not h264 — the TV would refuse this"
+    return None
+
+
+def on_network_fs(path):
+    """True if path lives on a FUSE/network mount rather than a local disk."""
+    try:
+        target = str(Path(path).resolve())
+        best, best_type = "", ""
+        for line in Path("/proc/mounts").read_text().splitlines():
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            point, fstype = parts[1].replace("\\040", " "), parts[2]
+            if target.startswith(point) and len(point) > len(best):
+                best, best_type = point, fstype
+        return best_type.startswith(("fuse", "nfs", "cifs", "smb", "sshfs"))
+    except OSError:
+        return False
+
+
+def stage_source(feature, tmpdir):
+    """Copy a source film to local disk before encoding.
+
+    A multi-hour encode reading straight off the pCloud FUSE mount depends on
+    that mount surviving the whole run, and it does not: a stalled read wedges
+    ffmpeg and the work is lost. Copying first turns hours of fragile streaming
+    into one sequential copy that can simply be retried.
+    """
+    size = feature.stat().st_size
+    free = shutil.disk_usage(tmpdir).free
+    # Leave room for the encoded output alongside the copy.
+    if free < size * 2 + 2 * 1024**3:
+        warn(f"not enough local space to stage ({human(free)} free) — reading directly")
+        return None
+    # Kept in its own subdirectory: a source named "Spy Game (2001).mp4" would
+    # otherwise collide with the output of the same name, and ffmpeg refuses to
+    # read and write one path.
+    staged_dir = Path(tmpdir) / "source"
+    staged_dir.mkdir(exist_ok=True)
+    local = staged_dir / feature.name
+    print(f"{DIM}  staging:   copying {human(size)} to local disk ...{RESET}", flush=True)
+    t0 = time.time()
+    try:
+        shutil.copyfile(feature, local)
+    except OSError as e:
+        warn(f"staging failed ({e}) — reading directly")
+        return None
+    if local.stat().st_size != size:
+        warn("staged copy is short — reading directly")
+        return None
+    rate = size / max(time.time() - t0, 0.001) / 1024**2
+    print(f"{DIM}  staged:    {human(size)} in {hms(time.time() - t0)} ({rate:.0f} MB/s){RESET}")
+    return local
+
+
+def deliver(src, dest):
+    """Copy into place on the destination, leaving nothing partial behind."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Built by name rather than with_suffix, which mangles titles ending in a dot.
+    tmp = dest.parent / (dest.name + ".partial")
+    shutil.copyfile(src, tmp)
+    if tmp.stat().st_size != src.stat().st_size:
+        tmp.unlink(missing_ok=True)
+        raise IOError(f"short copy to {dest}")
+    tmp.replace(dest)
+
+
+# --- per-film pipeline -------------------------------------------------------
+
+
+def plan(movie_dir):
+    """Everything decided about one film before any work happens."""
+    feature = find_feature(movie_dir)
+    if not feature:
+        return {"dir": movie_dir, "error": "no video file found"}
+    return {
+        "dir": movie_dir,
+        "feature": feature,
+        "title": clean_title(movie_dir.name),
+        "sub": find_subtitle(movie_dir, feature),
+    }
+
+
+def make_subtitle(item, meta, args, tmpdir, title, feature=None):
+    """Produce a UTF-16 .srt in tmpdir for one film, or None.
+
+    Order of preference: a sidecar found next to the film, then an embedded text
+    track, then OCR of picture subtitles.
+    """
+    if args.no_subs:
+        print("  subtitles: skipped")
+        return None
+
+    feature = feature or item["feature"]
+    sub_src = item["sub"]
+    if not sub_src:
+        idx = pick_sub_stream(meta)
+        if idx is not None:
+            sub_src = extract_embedded_sub(feature, idx, tmpdir)
+            if not sub_src:
+                warn("embedded subtitle track could not be extracted")
+        else:
+            # No text track anywhere. Without OCR a foreign-language film
+            # arrives on the TV unwatchable, so this is the last resort.
+            img_idx = pick_image_sub_stream(meta)
+            if img_idx is not None and not args.no_ocr:
+                if not HAVE_OCR_DEPS:
+                    warn("image subtitles need python3-pil and python3-numpy")
+                elif not shutil.which("tesseract"):
+                    warn("image subtitles need tesseract-ocr")
+                else:
+                    sub_src = ocr_image_subs(feature, img_idx, tmpdir,
+                                             jobs=args.ocr_jobs)
+                    if not sub_src:
+                        warn("OCR of image subtitles produced nothing")
+
+    if not sub_src:
+        subs = streams_of(meta, "subtitle")
+        if subs and any(s.get("codec_name") == "dvd_subtitle" for s in subs):
+            warn("only VOBSUB picture subtitles, which OCR does not handle — none written")
+        elif subs:
+            warn("only image-based subtitles — none written")
+        else:
+            print("  subtitles: none found")
+        return None
+
+    tmp_srt = Path(tmpdir) / f"{title}.srt"
+    res = write_utf16_srt(sub_src, tmp_srt)
+    if not res:
+        warn(f"could not decode subtitle file: {sub_src}")
+        return None
+    cues, dropped = res
+    extra = f" ({dropped} advert captions removed)" if dropped else ""
+    origin = ("OCR" if sub_src.name == "ocr.srt"
+              else "embedded" if sub_src.parent == Path(tmpdir)
+              else rel(sub_src, args.source))
+    print(f"  subtitles: {cues} cues UTF-16LE from {origin}{extra}")
+    return tmp_srt
+
+
+def process_subs_only(item, args):
+    """Rebuild just the .srt sidecar beside an already-converted film."""
+    title = item["title"]
+    out_mp4 = args.dest / f"{title}.mp4"
+    out_srt = args.dest / f"{title}.srt"
+
+    print(f"\n{BOLD}{title}{RESET}")
+    if not out_mp4.exists():
+        print(f"  {DIM}no converted .mp4 yet — skipping{RESET}")
+        return "skipped"
+    if out_srt.exists() and not args.force:
+        print(f"  {GREEN}subtitles already present{RESET} — skipping (use --force to redo)")
+        return "skipped"
+
+    meta = ffprobe(item["feature"])
+    if not meta:
+        warn("could not probe — skipping")
+        return "failed"
+
+    args.work.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=args.work) as tmpdir:
+        # OCR reads the whole film, so stage it for the same reason encoding does.
+        src = item["feature"]
+        needs_read = item["sub"] is None
+        if needs_read and not args.no_stage and on_network_fs(src):
+            src = stage_source(src, tmpdir) or src
+        sub = make_subtitle(item, meta, args, tmpdir, title, feature=src)
+        if not sub:
+            return "failed"
+        try:
+            deliver(sub, out_srt)
+        except (OSError, IOError) as e:
+            warn(f"delivery failed: {e}")
+            return "failed"
+    print(f"  {GREEN}done{RESET} -> {out_srt.name}")
+    return "converted"
+
+
+def process(item, args, encoder):
+    title = item["title"]
+    feature = item["feature"]
+    out_mp4 = args.dest / f"{title}.mp4"
+    out_srt = args.dest / f"{title}.srt"
+
+    print(f"\n{BOLD}{title}{RESET}")
+    print(f"{DIM}  source:    {rel(feature, args.source)} ({human(feature.stat().st_size)}){RESET}")
+
+    if out_mp4.exists() and not args.force:
+        print(f"  {GREEN}already done{RESET} — skipping (use --force to redo)")
+        return "skipped"
+
+    meta = ffprobe(feature)
+    if not meta:
+        warn("could not probe — skipping")
+        return "failed"
+    if not streams_of(meta, "audio"):
+        warn("no audio stream — skipping")
+        return "failed"
+
+    audio_idx = pick_audio(meta, args.audio)
+    astream = streams_of(meta, "audio")[audio_idx]
+    duration = float(meta.get("format", {}).get("duration") or 0)
+
+    args.work.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=args.work) as tmpdir:
+        tmp_mp4 = Path(tmpdir) / f"{title}.mp4"
+
+        lang = lang_of(astream) or "und"
+        _, vnote, anote = build_command(
+            feature, meta, tmp_mp4, audio_idx, encoder, args.qp, args.crf,
+            args.max_height)
+        print(f"  video:     {vnote}")
+        print(f"  audio:     track {audio_idx} [{lang}] {astream.get('codec_name')} — {anote}")
+        if duration:
+            print(f"  runtime:   {hms(duration)}")
+
+        if args.dry_run:
+            cmd, _, _ = build_command(feature, meta, tmp_mp4, audio_idx, encoder,
+                                      args.qp, args.crf, args.max_height)
+            print(f"{DIM}  would run: {' '.join(cmd)}{RESET}")
+            print(f"{DIM}  would write: {out_mp4}{RESET}")
+            return "planned"
+
+        # Read from a local copy where possible; see stage_source.
+        src = feature
+        if not args.no_stage and on_network_fs(feature):
+            src = stage_source(feature, tmpdir) or feature
+        cmd, _, _ = build_command(src, meta, tmp_mp4, audio_idx, encoder,
+                                  args.qp, args.crf, args.max_height)
+
+        start = time.time()
+        r = subprocess.run(cmd)
+        if r.returncode != 0 or not tmp_mp4.exists():
+            warn("ffmpeg failed — skipping")
+            return "failed"
+
+        problem = verify(tmp_mp4)
+        if problem:
+            warn(problem)
+            return "failed"
+
+        size = tmp_mp4.stat().st_size
+        elapsed = time.time() - start
+        print(f"  encoded:   {human(size)} in {hms(elapsed)}")
+        if size > 4 * 1024**3:
+            warn(f"{human(size)} exceeds 4GB — fine on exFAT, will not fit on FAT32")
+
+        # A subtitle failure is never fatal to the film itself.
+        sub_result = make_subtitle(item, meta, args, tmpdir, title, feature=src)
+
+        print(f"{DIM}  uploading to {args.dest.name}/ ...{RESET}", flush=True)
+        try:
+            deliver(tmp_mp4, out_mp4)
+            if sub_result:
+                deliver(sub_result, out_srt)
+        except (OSError, IOError) as e:
+            warn(f"delivery failed: {e}")
+            return "failed"
+
+    print(f"  {GREEN}done{RESET} -> {out_mp4.name}")
+    return "converted"
+
+
+# --- entry point -------------------------------------------------------------
+
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="bravia-ready",
+        description="Convert a movie library into files a Sony Bravia plays off USB.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "examples:\n"
+            "  bravia-ready --list                 show the plan, touch nothing\n"
+            "  bravia-ready                        convert everything outstanding\n"
+            "  bravia-ready 'Spy Game (2001)'      convert one title\n"
+            "  bravia-ready --limit 2              convert the next two only\n"
+        ),
+    )
+    p.add_argument("titles", nargs="*",
+                   help="directory names (or paths) to convert; default is all")
+    p.add_argument("--source", type=Path, default=SOURCE, help=f"library root (default {SOURCE})")
+    p.add_argument("--dest", type=Path, default=DEST, help=f"output directory (default {DEST})")
+    p.add_argument("--work", type=Path, default=WORK,
+                   help=f"local scratch space for encoding (default {WORK})")
+    p.add_argument("--list", action="store_true", help="show what was found and exit")
+    p.add_argument("--dry-run", action="store_true", help="show the ffmpeg commands, run nothing")
+    p.add_argument("--force", action="store_true", help="re-convert titles already in the destination")
+    p.add_argument("--no-subs", action="store_true", help="do not write subtitle files")
+    p.add_argument("--no-ocr", action="store_true",
+                   help="do not OCR image-based (PGS) subtitles")
+    p.add_argument("--ocr-jobs", type=int, default=4, metavar="N",
+                   help="parallel tesseract workers for OCR (default 4)")
+    p.add_argument("--subs-only", action="store_true",
+                   help="only (re)build subtitle sidecars; leave existing .mp4 files alone")
+    p.add_argument("--audio", type=int, metavar="N",
+                   help="use audio track N (0-based) instead of the file's default")
+    p.add_argument("--cpu", action="store_true", help="force the CPU encoder")
+    p.add_argument("--no-stage", action="store_true",
+                   help="read sources straight off the network mount instead of "
+                        "copying them to local disk first")
+    p.add_argument("--max-height", type=int, default=1080, metavar="PX",
+                   help="downscale taller sources; 4K H.264 is refused by the TV "
+                        "(default 1080, 0 to keep source resolution)")
+    p.add_argument("--qp", type=int, default=24, help="VAAPI quality, lower is better (default 24)")
+    p.add_argument("--crf", type=int, default=21, help="CPU quality, lower is better (default 21)")
+    p.add_argument("--limit", type=int, metavar="N", help="stop after N conversions")
+    args = p.parse_args()
+
+    for tool in ("ffmpeg", "ffprobe"):
+        if not shutil.which(tool):
+            die(f"{tool} not installed — sudo apt install ffmpeg")
+    if not args.source.is_dir():
+        die(f"no such directory: {args.source}")
+
+    if args.titles:
+        dirs = []
+        for t in args.titles:
+            cand = Path(t) if Path(t).is_dir() else args.source / t
+            if not cand.is_dir():
+                die(f"no such title: {t}")
+            dirs.append(cand)
+    else:
+        dirs = sorted(d for d in args.source.iterdir() if d.is_dir())
+    if not dirs:
+        die(f"no movie directories under {args.source}")
+
+    print(f"{BOLD}bravia-ready{RESET}  {args.source}  ->  {args.dest}")
+    print(f"{DIM}scanning {len(dirs)} director{'y' if len(dirs) == 1 else 'ies'}...{RESET}")
+
+    items, broken = [], []
+    for d in dirs:
+        item = plan(d)
+        (broken if item.get("error") else items).append(item)
+
+    for b in broken:
+        warn(f"{b['dir'].name}: {b['error']}")
+
+    if args.list:
+        print()
+        for item in items:
+            done = (args.dest / f"{item['title']}.mp4").exists()
+            mark = f"{GREEN}[done]{RESET}" if done else "[    ]"
+            sub = item["sub"].name if item["sub"] else f"{DIM}(embedded or none){RESET}"
+            print(f"{mark} {BOLD}{item['title']}{RESET}")
+            print(f"       {DIM}{item['feature'].name} — {human(item['feature'].stat().st_size)}{RESET}")
+            print(f"       {DIM}subs:{RESET} {sub}")
+        outstanding = sum(1 for i in items
+                          if not (args.dest / f"{i['title']}.mp4").exists())
+        print(f"\n{len(items)} title(s), {outstanding} outstanding")
+        return
+
+    if args.subs_only:
+        encoder = None
+        print(f"{DIM}subtitles only — existing .mp4 files will not be touched{RESET}")
+    else:
+        encoder = "cpu" if args.cpu else encoder_available()
+        if encoder == "cpu" and not args.cpu:
+            warn("no usable GPU encoder — falling back to CPU, this will be slow")
+        print(f"{DIM}encoder: {encoder}{RESET}")
+
+    counts = {"converted": 0, "skipped": 0, "failed": 0, "planned": 0}
+    for item in items:
+        if args.limit and counts["converted"] >= args.limit:
+            print(f"\n{DIM}--limit {args.limit} reached, stopping{RESET}")
+            break
+        try:
+            if args.subs_only:
+                counts[process_subs_only(item, args)] += 1
+            else:
+                counts[process(item, args, encoder)] += 1
+        except KeyboardInterrupt:
+            print(f"\n{YELLOW}interrupted — nothing partial was left in the destination{RESET}")
+            print(f"{DIM}run again to pick up where this left off{RESET}")
+            sys.exit(130)
+
+    print(f"\n{BOLD}summary{RESET}  "
+          f"{GREEN}{counts['converted']} converted{RESET}, "
+          f"{counts['skipped']} already done, "
+          f"{RED if counts['failed'] else DIM}{counts['failed']} failed{RESET}")
+    if counts["converted"]:
+        print(f"{DIM}files are in {args.dest}{RESET}")
+
+
+if __name__ == "__main__":
+    main()

@@ -12,6 +12,11 @@ info() { echo -e "\033[0;32m$*\033[0m"; }
 PACKAGES=()
 dpkg -s parted     &>/dev/null || PACKAGES+=(parted)
 dpkg -s exfatprogs &>/dev/null || PACKAGES+=(exfatprogs)
+dpkg -s ffmpeg     &>/dev/null || PACKAGES+=(ffmpeg)
+# bravia-ready: ffmpeg for conversion, the rest to OCR image-based subtitles.
+dpkg -s tesseract-ocr  &>/dev/null || PACKAGES+=(tesseract-ocr)
+dpkg -s python3-pil    &>/dev/null || PACKAGES+=(python3-pil)
+dpkg -s python3-numpy  &>/dev/null || PACKAGES+=(python3-numpy)
 
 if [[ ${#PACKAGES[@]} -gt 0 ]]; then
     info "Installing missing packages: ${PACKAGES[*]}"
@@ -25,6 +30,10 @@ fi
 sudo ln -sf "$SCRIPT_DIR/clean-usb" "$BIN_DIR/cleanusb"
 echo "  cleanusb — linked to $BIN_DIR"
 
+sudo ln -sf "$SCRIPT_DIR/bravia-ready" "$BIN_DIR/bravia-ready"
+echo "  bravia-ready — linked to $BIN_DIR"
+
 echo ""
 info "Done!"
 echo "  Usage: sudo cleanusb"
+echo "         bravia-ready --list"
