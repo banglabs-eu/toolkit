@@ -145,27 +145,69 @@ def is_extra(path, root):
     return "sample" in path.stem.lower()
 
 
-def find_feature(movie_dir):
-    """The main feature is the largest video file that is not bonus material."""
-    candidates = [
+def feature_candidates(movie_dir):
+    return [
         p for p in movie_dir.rglob("*")
         if p.is_file() and p.suffix.lower() in VIDEO_EXT and not is_extra(p, movie_dir)
     ]
+
+
+def looks_like_series(candidates):
+    """True if a directory holds episodes rather than one film with extras.
+
+    A film directory has one dominant file; a season has several of much the
+    same length. Picking "the largest" from a season yields one arbitrary
+    episode named after the whole show, so these are skipped instead.
+    """
+    if len(candidates) < 3:
+        return False
+    sizes = sorted((p.stat().st_size for p in candidates), reverse=True)
+    biggest = sizes[0]
+    if biggest == 0:
+        return False
+    # Count files in the same league as the largest — episodes cluster, a
+    # feature plus its trailers does not.
+    peers = sum(1 for s in sizes if s > biggest * 0.5)
+    return peers >= 3
+
+
+def find_feature(movie_dir):
+    """The main feature is the largest video file that is not bonus material."""
+    candidates = feature_candidates(movie_dir)
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_size)
 
 
 def clean_title(name):
-    """Reduce a release directory name to `Title (Year)`.
+    """Reduce a release directory or file name to `Title (Year)`.
 
     Everything after the year is release/edition noise:
-        High and Low (1963) Criterion + Extras  ->  High and Low (1963)
-    With no year, fall back to the name with bracketed tags stripped.
+        High and Low (1963) Criterion + Extras          -> High and Low (1963)
+        Dune.Part.Two.2024.2160p.WEB-DL.H.265-FLUX      -> Dune Part Two (2024)
+        [U3-Project] Ghost in the Shell (1995) [UHD-BD] -> Ghost in the Shell (1995)
+    With no year at all, fall back to the name with bracketed tags stripped.
     """
+    # Group tags at the front ("[ASIAN] ", "www.UIndex.org - ") are never title.
+    name = re.sub(r"^\s*(\[[^\]]*\]|www\.[^\s]*)\s*[-–]?\s*", "", name).strip()
+
     m = re.search(r"\((19|20)\d{2}\)", name)
-    title = name[: m.end()] if m else re.sub(r"[\[(][^\])]*[\])]", "", name)
+    if m:
+        title = name[: m.end()]
+    else:
+        # Scene naming separates words with dots and marks the year bare.
+        m = re.search(r"[.\s_](19|20)\d{2}(?=[.\s_]|$)", name)
+        if m:
+            year = m.group(0).strip("._ ")
+            title = f"{name[: m.start()]} ({year})"
+        else:
+            title = re.sub(r"[\[(][^\])]*[\])]", "", name)
+    # Dots stand in for spaces in scene names. Requiring two or more letters
+    # after the dot leaves initialisms ("S.W.A.T") and numbers ("5.1") intact.
+    title = re.sub(r"(?<=\w)\.(?=[A-Za-z]{2,})", " ", title)
     title = re.sub(r"\s+", " ", title).strip(" .-_")
+    if title.islower():
+        title = title.title()
     # exFAT rejects these outright; strip rather than let the copy fail later.
     return re.sub(r'[\\/:*?"<>|]', "", title)
 
@@ -247,14 +289,25 @@ def pick_image_sub_stream(meta):
     return best
 
 
-def pick_sub_stream(meta):
-    """Index (within subtitle streams) of the best embedded text track, or None."""
+def pick_sub_stream(meta, allow_partial=False):
+    """Index (within subtitle streams) of the best embedded text track, or None.
+
+    Forced tracks normally caption only signage, so they are skipped. But some
+    rips label the sole full subtitle track "forced", and on a foreign-language
+    film that track is the dialogue — so a second pass accepts it rather than
+    ship the film with nothing.
+    """
     subs = streams_of(meta, "subtitle")
     best, best_score = None, -1
     for i, s in enumerate(subs):
         if s.get("codec_name") not in TEXT_SUBS:
             continue  # image-based, cannot be turned into .srt
         text = lang_of(s) + " " + title_of(s)
+        if allow_partial:
+            score = 10 if lang_of(s) in ("eng", "en") else 0
+            if score > best_score:
+                best, best_score = i, score
+            continue
         if re.search(r"forced|sdh|commentary|sign|song", text):
             continue
         score = 0
@@ -585,6 +638,11 @@ def build_command(feature, meta, out_path, audio_idx, encoder, qp, crf, max_heig
     # has to come down or it is refused just as HEVC is. The limit is a frame
     # budget rather than a height: a 3840x1606 scope film scaled to 1080 tall is
     # still 2582 wide, which busts the same budget. So fit inside a 16:9 box.
+    # HDR carries its brightness in a PQ/HLG curve the TV will not interpret in
+    # an SDR H.264 stream. Handed over untouched it plays washed-out and grey,
+    # so it has to be tone-mapped down to BT.709 rather than merely converted.
+    hdr = vstream.get("color_transfer") in ("smpte2084", "arib-std-b67")
+
     max_width = round(max_height * 16 / 9 / 2) * 2 if max_height else 0
     scaling = bool(max_height and (height > max_height or width > max_width))
     # decrease-only, so a smaller source is never blown up; divisible-by-2
@@ -592,34 +650,58 @@ def build_command(feature, meta, out_path, audio_idx, encoder, qp, crf, max_heig
     scale = (f"scale=w={max_width}:h={max_height}"
              ":force_original_aspect_ratio=decrease:force_divisible_by=2")
 
+    # Linearise the PQ/HLG curve, tone-map in linear light, then land in BT.709.
+    tonemap = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
+               "tonemap=tonemap=hable:desat=0,"
+               "zscale=t=bt709:m=bt709:r=tv,format=yuv420p")
+
     pre, vopts = [], []
-    if vcodec == "h264" and not scaling:
+    if vcodec == "h264" and not scaling and not hdr:
         vopts = ["-c:v", "copy"]
         vnote = "copied (already H.264)"
     elif encoder == "vaapi":
         pre = ["-vaapi_device", "/dev/dri/renderD128"]
         # nv12 also flattens 10-bit sources to 8-bit, which H.264 needs anyway.
-        chain = (f"{scale}," if scaling else "") + "format=nv12,hwupload"
+        chain = ",".join(filter(None, [
+            tonemap if hdr else "", scale if scaling else "",
+            "format=nv12", "hwupload"]))
         vopts = ["-vf", chain, "-c:v", "h264_vaapi", "-qp", str(qp)]
         vnote = f"re-encode {vcodec} -> H.264 (GPU)"
     else:
+        chain = ",".join(filter(None, [tonemap if hdr else "",
+                                       scale if scaling else ""]))
         vopts = ["-c:v", "libx264", "-crf", str(crf), "-preset", "veryfast",
                  "-pix_fmt", "yuv420p"]
-        if scaling:
-            vopts = ["-vf", scale] + vopts
+        if chain:
+            vopts = ["-vf", chain] + vopts
         vnote = f"re-encode {vcodec} -> H.264 (CPU, slow)"
+    if hdr:
+        # Tone mapping runs in software, so it caps throughput regardless of GPU.
+        vnote += ", HDR tone-mapped to SDR"
     if scaling:
         vnote += f", {width}x{height} scaled into {max_width}x{max_height}"
 
     # aresample at the end is essential: loudnorm runs at 192 kHz internally,
     # and without it the encoder inherits that and clamps to AAC's 96 kHz
     # ceiling. The result is a valid file that plays silently on the TV.
-    loudnorm = "loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000"
+    # alimiter is a safety stage, not a creative one: loudnorm can emit
+    # non-finite samples (seen at the tail of a DTS track), and the AAC encoder
+    # rejects the whole file with "Error submitting audio frame". Clamping
+    # downstream keeps the output finite. It sits above loudnorm's -1.5 dBFS
+    # target, so on well-behaved audio it never engages. aformat then pins the
+    # layout and sample format the encoder receives.
+    loudnorm = ("loudnorm=I=-16:TP=-1.5:LRA=11,alimiter=limit=0.98,"
+                "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo")
     if achan >= 6:
         # The centre channel carries the dialogue, so keep it loud relative to
         # the rest. LFE is dropped: TV speakers cannot reproduce that band, so
         # it contributes nothing audible while eating headroom dialogue needs.
-        af = ("pan=stereo|FL=1.0*FC+0.707*FL+0.5*BL|FR=1.0*FC+0.707*FR+0.5*BR,"
+        #
+        # Channels are addressed positionally (c0..c5) rather than by name.
+        # DTS commonly reports "5.1(side)", which has SL/SR where plain 5.1 has
+        # BL/BR; naming BL/BR there silently substitutes silence and drops the
+        # surrounds from the mix. The running order is identical either way.
+        af = ("pan=stereo|FL=1.0*c2+0.707*c0+0.5*c4|FR=1.0*c2+0.707*c1+0.5*c5,"
               "acompressor=threshold=-18dB:ratio=3:attack=20:release=250,"
               + loudnorm)
         anote = f"{achan}ch downmixed to stereo, dialogue lifted"
@@ -724,17 +806,53 @@ def deliver(src, dest):
 # --- per-film pipeline -------------------------------------------------------
 
 
-def plan(movie_dir):
-    """Everything decided about one film before any work happens."""
-    feature = find_feature(movie_dir)
-    if not feature:
-        return {"dir": movie_dir, "error": "no video file found"}
+def plan(entry):
+    """Everything decided about one film before any work happens.
+
+    `entry` is either a directory holding a film, or a bare video file sitting
+    loose in the library root — both arrangements occur in practice.
+    """
+    if entry.is_file():
+        return {
+            "dir": entry.parent,
+            "feature": entry,
+            "title": clean_title(entry.stem),
+            # A loose film can only have a sidecar of exactly its own name;
+            # anything else in the root belongs to a different film.
+            "sub": entry.with_suffix(".srt") if entry.with_suffix(".srt").is_file() else None,
+        }
+    candidates = feature_candidates(entry)
+    if not candidates:
+        return {"dir": entry, "error": "no video file found"}
+    if looks_like_series(candidates):
+        return {"dir": entry,
+                "error": f"looks like a series ({len(candidates)} episodes) — "
+                         "this tool converts films, one per directory"}
+    feature = max(candidates, key=lambda p: p.stat().st_size)
     return {
-        "dir": movie_dir,
+        "dir": entry,
         "feature": feature,
-        "title": clean_title(movie_dir.name),
-        "sub": find_subtitle(movie_dir, feature),
+        "title": clean_title(entry.name),
+        "sub": find_subtitle(entry, feature),
     }
+
+
+def flag_duplicates(items):
+    """Mark films whose titles collide, so neither is silently overwritten."""
+    by_title = {}
+    for it in items:
+        by_title.setdefault(it["title"].lower(), []).append(it)
+    for group in by_title.values():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda i: i["feature"].stat().st_size, reverse=True)
+        for rank, it in enumerate(group):
+            it["duplicate"] = [g["feature"].name for g in group]
+            # Both would write the same output name, so convert neither until
+            # the choice is made explicitly by naming one on the command line.
+            it["error"] = ("duplicate title — pass one filename explicitly; "
+                           f"largest is {group[0]['feature'].name}")
+            it["dup_rank"] = rank
 
 
 def make_subtitle(item, meta, args, tmpdir, title, feature=None):
@@ -751,8 +869,16 @@ def make_subtitle(item, meta, args, tmpdir, title, feature=None):
     sub_src = item["sub"]
     if not sub_src:
         idx = pick_sub_stream(meta)
+        partial = False
+        if idx is None:
+            # Nothing but forced/partial tracks — better than no subtitles.
+            idx = pick_sub_stream(meta, allow_partial=True)
+            partial = idx is not None
         if idx is not None:
             sub_src = extract_embedded_sub(feature, idx, tmpdir)
+            if partial and sub_src:
+                warn("only a 'forced' subtitle track exists — using it; it may "
+                     "caption only part of the dialogue")
             if not sub_src:
                 warn("embedded subtitle track could not be extracted")
         else:
@@ -969,25 +1095,47 @@ def main():
     if not args.source.is_dir():
         die(f"no such directory: {args.source}")
 
-    if args.titles:
-        dirs = []
+    explicit = bool(args.titles)
+    if explicit:
+        entries = []
         for t in args.titles:
-            cand = Path(t) if Path(t).is_dir() else args.source / t
-            if not cand.is_dir():
+            cand = Path(t)
+            if not cand.exists():
+                cand = args.source / t
+            if not cand.exists():
                 die(f"no such title: {t}")
-            dirs.append(cand)
+            entries.append(cand)
     else:
-        dirs = sorted(d for d in args.source.iterdir() if d.is_dir())
-    if not dirs:
-        die(f"no movie directories under {args.source}")
+        # Films live either in their own directory or loose in the root.
+        entries = sorted(
+            e for e in args.source.iterdir()
+            if e.is_dir() or (e.is_file() and e.suffix.lower() in VIDEO_EXT
+                              and "sample" not in e.stem.lower())
+        )
+    if not entries:
+        die(f"no films found under {args.source}")
 
     print(f"{BOLD}bravia-ready{RESET}  {args.source}  ->  {args.dest}")
-    print(f"{DIM}scanning {len(dirs)} director{'y' if len(dirs) == 1 else 'ies'}...{RESET}")
+    print(f"{DIM}scanning {len(entries)} entr{'y' if len(entries) == 1 else 'ies'}...{RESET}")
 
     items, broken = [], []
-    for d in dirs:
+    for d in entries:
         item = plan(d)
         (broken if item.get("error") else items).append(item)
+
+    # Naming one film explicitly is how a duplicate gets resolved, so only
+    # apply the check when sweeping the whole library.
+    if not explicit:
+        flag_duplicates(items)
+        items, dupes = ([i for i in items if not i.get("error")],
+                        [i for i in items if i.get("error")])
+        # Report each colliding group once rather than once per file.
+        seen = set()
+        for d in dupes:
+            key = d["title"].lower()
+            if key not in seen:
+                seen.add(key)
+                broken.append(d)
 
     for b in broken:
         warn(f"{b['dir'].name}: {b['error']}")
