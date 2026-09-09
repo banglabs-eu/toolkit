@@ -159,8 +159,10 @@ AC/DC, whose pulse is swung but whose drums are not.
 
 Tracks under 2.5 minutes are dropped, the same song on two albums is entered once,
 and the playlist is written best-first. Cadence fit counts a track's double and half
-tempo too, discounted — a runner lands on the beat or on every second one — so an
-85 BPM track is a legitimate match for a 170 spm cadence.
+tempo too — a runner lands on the beat or on every second one — so an 85 BPM track
+can legitimately match a 170 spm cadence. That doubling is also how a ballad gets in,
+so it is discounted to 0.70 and withheld entirely from tracks below 0.45 pulse or
+0.20 percussive: a slow song with a hard backbeat qualifies, a rubato one does not.
 
 Output lands next to the library root:
 

@@ -128,6 +128,15 @@ RUN_MIN_DURATION = 150.0      # seconds; shorter tracks churn too fast on a run
 # match, in BPM. Tight enough to mean something, wide enough that a library whose
 # tempos cluster in the 120s still fills a playlist.
 RUN_CADENCE_TOLERANCE = 18.0
+# Credit for matching the cadence at a track's own tempo, at double it (two steps
+# to the beat) and at half it. The doubled path is what lets a ballad in through
+# the back door, so it is discounted hardest -- and gated below.
+RUN_TEMPO_DISCOUNTS = {"exact": 1.0, "doubled": 0.70, "halved": 0.85}
+# ...gated on the track having a beat to double in the first place. A slow track
+# with a hard backbeat (rock, hip-hop) passes; a rubato ballad whose percussion is
+# a brushed snare does not, however well it scores on everything else.
+RUN_DOUBLING_MIN_PULSE = 0.45
+RUN_DOUBLING_MIN_PERCUSSIVE = 0.20
 
 DEFAULT_BANDS = [
     ("Chill", 60.0, 90.0),
@@ -746,19 +755,21 @@ def scale(value, low, high, default=0.5):
     return max(0.0, min(1.0, (value - low) / (high - low)))
 
 
-def cadence_fit(bpm, cadence):
+def cadence_fit(bpm, cadence, allow_doubling=True):
     """
     How well a tempo matches a target step rate, 0-1.
 
     A runner lands on the beat, on every second beat, or takes two steps to the
-    beat, so the track's double and half count too -- discounted, because a
-    half-time match is a weaker pull than the real thing.
+    beat, so the track's double and half count too -- discounted, because neither
+    pulls as hard as the real thing. Doubling is the one a slow song rides in on,
+    so the caller withholds it from tracks with no beat to double.
     """
-    best = 0.0
-    for candidate, discount in ((bpm, 1.0), (bpm * 2.0, 0.90), (bpm / 2.0, 0.85)):
-        best = max(best, math.exp(
-            -((candidate - cadence) / RUN_CADENCE_TOLERANCE) ** 2) * discount)
-    return best
+    candidates = [(bpm, RUN_TEMPO_DISCOUNTS["exact"]),
+                  (bpm / 2.0, RUN_TEMPO_DISCOUNTS["halved"])]
+    if allow_doubling:
+        candidates.append((bpm * 2.0, RUN_TEMPO_DISCOUNTS["doubled"]))
+    return max(math.exp(-((candidate - cadence) / RUN_CADENCE_TOLERANCE) ** 2) * discount
+               for candidate, discount in candidates)
 
 
 def score_run(record, cadence):
@@ -782,8 +793,11 @@ def score_run(record, cadence):
     if swing is None:
         swing = record.get("dynamics")
 
+    doubling = ((record.get("pulse") or 0.0) >= RUN_DOUBLING_MIN_PULSE
+                and (record.get("percussive") or 0.0) >= RUN_DOUBLING_MIN_PERCUSSIVE)
+
     parts = {
-        "cadence": cadence_fit(record["bpm"], cadence),
+        "cadence": cadence_fit(record["bpm"], cadence, doubling),
         "pulse": scale(record.get("pulse"), 0.25, 0.75),
         "percussive": scale(record.get("percussive"), 0.10, 0.35),
         "valence": 0.6 * mode_score + 0.4 * scale(record.get("centroid_hz"), 700.0, 3500.0),
