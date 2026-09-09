@@ -21,11 +21,15 @@ Usage:
     music-index --bands            # a ladder of BPM playlists instead of just one
     music-index --band Run=130-150 --band Sprint=150-180
     music-index --playlists-only   # rebuild the playlists from the cache, no analysis
+    music-index --run-mix          # feel-good running playlist, ranked, not just BPM
+    music-index --cadence 165 --top 80    # tune the run mix
 
 Output, written next to the library root:
     bpm_index.csv          every track: title, artist, album, BPM, key, energy, path
     running_130_160.m3u8   the BPM window as a playlist, slowest track first
     <band>_<low>_<high>.m3u8   one file per --band / --bands window, same shape
+    run_mix.m3u8           --run-mix: ranked by a blend of cadence fit, pulse,
+                           percussion, valence and dynamic consistency
     .bpm_cache.jsonl       append-only cache, so an interrupted scan resumes
 
 What gets measured, and how much to trust it
@@ -44,7 +48,20 @@ What gets measured, and how much to trust it
                whole track. ReplayGain gain is referenced to -18 LUFS. These are
                standard-compliant numbers, not estimates.
     Energy     A 1-10 heuristic blending loudness, brightness and onset density. It is
-               a convenience for ordering a run, not an established measure.
+               a convenience for ordering a run, not an established measure. Loudness
+               dominates it, so it tracks how hard a record was mastered as much as how
+               hard it drives -- which is what Pulse and Percussive are for.
+    Pulse      How strongly a steady beat stands out of the onset envelope: the largest
+               off-zero peak of its autocorrelation, over lags of 40-200 BPM. Level
+               independent, so a quiet ballad and a loud one are told apart on rhythm
+               rather than on mastering. This is the column that keeps calm tracks out
+               of a running playlist.
+    Percussive Share of spectral energy in the percussive component of a harmonic /
+               percussive separation. Drums-forward music scores high, strings and pads
+               low, whatever the tempo says.
+    Dynamics   Loud-to-quiet spread within the analysed windows (95th minus 10th
+               percentile of frame RMS, in dB), alongside EBU R128 loudness range (LRA)
+               across the whole track. A track with a long quiet intro breaks a run.
 
 Why every file read goes through a subprocess
     This library lives on network storage (pCloud/FUSE). A file the server cannot
@@ -57,6 +74,7 @@ Why every file read goes through a subprocess
 
 import argparse
 import csv
+import math
 import json
 import os
 import re
@@ -97,6 +115,20 @@ CACHE_NAME = ".bpm_cache.jsonl"
 # The ladder --bands writes. Bands are half-open, [low, high), so a track at exactly
 # 130 BPM lands in Run and nowhere else. The single --playlist window stays inclusive
 # at both ends, as it always was.
+# Bumped whenever a new measurement is added: a cached record made by an older
+# version is re-analysed on the next run, so upgrading does not need --rescan.
+FEATURE_VERSION = 2
+
+# Weights of the run-mix score. Cadence fit leads, then the two rhythm measures;
+# valence and dynamic consistency are tie-breakers, not gatekeepers.
+RUN_WEIGHTS = {"cadence": 0.35, "pulse": 0.25, "percussive": 0.20,
+               "valence": 0.10, "consistency": 0.10}
+RUN_MIN_DURATION = 150.0      # seconds; shorter tracks churn too fast on a run
+# How far a tempo may sit from the target cadence before it stops counting as a
+# match, in BPM. Tight enough to mean something, wide enough that a library whose
+# tempos cluster in the 120s still fills a playlist.
+RUN_CADENCE_TOLERANCE = 18.0
+
 DEFAULT_BANDS = [
     ("Chill", 60.0, 90.0),
     ("Walk", 90.0, 110.0),
@@ -167,7 +199,7 @@ def decode_and_measure(path):
     """
     One decode of the whole track, producing both:
       - the audio as mono float32 at SAMPLE_RATE, for tempo and key
-      - EBU R128 integrated loudness and true peak, measured at native rate
+      - EBU R128 integrated loudness, loudness range and true peak, at native rate
 
     Splitting the stream inside ffmpeg means the file crosses the network once.
     """
@@ -186,17 +218,21 @@ def decode_and_measure(path):
     samples = np.frombuffer(out, dtype=np.float32)
     text = (err or b"").decode("utf-8", "replace")
 
-    loudness = peak_db = None
+    loudness = peak_db = lra = None
     summary = text.rsplit("Integrated loudness:", 1)
     if len(summary) == 2:
         match = re.search(r"I:\s*(-?[\d.]+)\s*LUFS", summary[1])
         if match:
             loudness = float(match.group(1))
+        # "LRA:" and not "LRA low:"/"LRA high:", which report levels rather than range.
+        match = re.search(r"LRA:\s*(-?[\d.]+)\s*LU", summary[1])
+        if match:
+            lra = float(match.group(1))
     match = re.search(r"Peak:\s*(-?[\d.]+)\s*dBFS", text)
     if match:
         peak_db = float(match.group(1))
 
-    return samples, loudness, peak_db
+    return samples, loudness, peak_db, lra
 
 
 # --------------------------------------------------------------------------- files
@@ -310,8 +346,57 @@ def rate_energy(loudness, centroid_hz, onset_rate):
     return int(round(1 + 9 * blended))
 
 
+def pulse_clarity(onset, sr, hop=512):
+    """
+    How strongly a steady beat stands out of the onset envelope, 0-1.
+
+    The envelope is autocorrelated and the largest peak over musically plausible
+    lags (40-200 BPM) taken, normalised by the zero-lag energy. Dance music lands
+    near 0.8, a rubato piano ballad near 0.15 -- and neither number moves when the
+    master gets louder, which is exactly what the energy rating cannot manage.
+    """
+    import numpy as np
+
+    centred = onset - onset.mean()
+    if centred.size < 32 or not np.any(centred):
+        return None
+    correlation = np.correlate(centred, centred, mode="full")[centred.size - 1:]
+    if correlation[0] <= 0:
+        return None
+    correlation = correlation / correlation[0]
+    low = max(1, int(60.0 / 200.0 * sr / hop))       # 200 BPM: shortest lag we believe
+    high = min(correlation.size, int(60.0 / 40.0 * sr / hop))   # 40 BPM: longest
+    if high <= low:
+        return None
+    return float(max(0.0, min(1.0, correlation[low:high].max())))
+
+
+def percussive_share(spectrum):
+    """Fraction of spectral energy in the percussive half of an HPSS split, 0-1."""
+    import numpy as np
+    import librosa
+
+    harmonic, percussive = librosa.decompose.hpss(spectrum)
+    total = float((harmonic ** 2).sum() + (percussive ** 2).sum())
+    if total <= 0:
+        return None
+    return float((percussive ** 2).sum() / total)
+
+
+def dynamic_spread(spectrum):
+    """Loud-to-quiet spread in dB across frames: 95th percentile minus 10th."""
+    import numpy as np
+    import librosa
+
+    rms = librosa.feature.rms(S=spectrum)[0]
+    if rms.size < 8 or not np.any(rms):
+        return None
+    db = librosa.amplitude_to_db(rms + 1e-9)
+    return float(np.percentile(db, 95) - np.percentile(db, 10))
+
+
 def analyse_audio(samples, loudness):
-    """Tempo, key and energy from the decoded track."""
+    """Tempo, key, energy and the rhythm measures, from the decoded track."""
     import numpy as np
     import librosa
 
@@ -320,14 +405,24 @@ def analyse_audio(samples, loudness):
     chromas = []
     centroids = []
     onset_rates = []
+    pulses = []
+    percussives = []
+    spreads = []
 
     for start, end in window_slices(samples.size):
         block = np.ascontiguousarray(samples[start:end], dtype=np.float32)
         if block.size < SAMPLE_RATE * 5:
             continue
 
+        # One STFT per window, shared by brightness, HPSS and the RMS spread, rather
+        # than letting each librosa helper compute its own.
+        spectrum = np.abs(librosa.stft(block))
+
         onset = librosa.onset.onset_strength(y=block, sr=SAMPLE_RATE)
         if onset.size >= 16 and np.any(onset):
+            clarity = pulse_clarity(onset, SAMPLE_RATE)
+            if clarity is not None:
+                pulses.append(clarity)
             value = float(np.atleast_1d(
                 tempo(onset_envelope=onset, sr=SAMPLE_RATE, aggregate=np.median))[0])
             if value > 0:
@@ -338,7 +433,14 @@ def analyse_audio(samples, loudness):
 
         chromas.append(librosa.feature.chroma_cqt(y=block, sr=SAMPLE_RATE).mean(axis=1))
         centroids.append(float(
-            librosa.feature.spectral_centroid(y=block, sr=SAMPLE_RATE).mean()))
+            librosa.feature.spectral_centroid(S=spectrum, sr=SAMPLE_RATE).mean()))
+
+        share = percussive_share(spectrum)
+        if share is not None:
+            percussives.append(share)
+        spread = dynamic_spread(spectrum)
+        if spread is not None:
+            spreads.append(spread)
 
     if not estimates:
         raise ValueError("no tempo found (silent or too short)")
@@ -360,28 +462,39 @@ def analyse_audio(samples, loudness):
                          float(np.mean(centroids)) if centroids else None,
                          float(np.mean(onset_rates)) if onset_rates else None)
 
+    def median(values, digits=3):
+        return round(float(np.median(values)), digits) if values else None
+
     return {
         "bpm": round(bpm, 1),
         "confidence": round(confidence, 3),
         "key": key,
         "key_confidence": key_confidence,
+        "mode": "minor" if key.endswith("m") else ("major" if key else ""),
         "energy": energy,
+        "pulse": median(pulses),
+        "percussive": median(percussives),
+        "dynamics": median(spreads, 1),
+        "centroid_hz": round(float(np.mean(centroids)), 1) if centroids else None,
     }
 
 
 def analyse(path):
     """Worker entry point. Always returns a record, error or not."""
     record = {"path": path, "bpm": None, "confidence": 0.0, "duration": None,
-              "key": "", "key_confidence": 0.0, "energy": None,
-              "loudness": None, "peak_db": None, "gain_db": None, "error": ""}
+              "key": "", "key_confidence": 0.0, "mode": "", "energy": None,
+              "pulse": None, "percussive": None, "dynamics": None, "centroid_hz": None,
+              "loudness": None, "peak_db": None, "gain_db": None, "lra": None,
+              "features": FEATURE_VERSION, "error": ""}
     tags = {}
     try:
         duration, tags = probe(path)
         record["duration"] = round(duration, 1) if duration else None
 
-        samples, loudness, peak_db = decode_and_measure(path)
+        samples, loudness, peak_db, lra = decode_and_measure(path)
         record["loudness"] = loudness
         record["peak_db"] = peak_db
+        record["lra"] = lra
         if loudness is not None and loudness > -70.0:      # -70 LUFS means silence
             record["gain_db"] = round(REPLAYGAIN_REFERENCE_LUFS - loudness, 2)
 
@@ -572,8 +685,9 @@ def write_csv(records, csv_path, root):
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["Title", "Artist", "Album", "BPM", "BPM_Half", "BPM_Double",
-                         "Confidence", "Key", "KeyConfidence", "Energy",
-                         "Loudness_LUFS", "ReplayGain_dB", "TruePeak_dBFS",
+                         "Confidence", "Key", "KeyConfidence", "Mode", "Energy",
+                         "Pulse", "Percussive", "Dynamics_dB",
+                         "Loudness_LUFS", "LRA_LU", "ReplayGain_dB", "TruePeak_dBFS",
                          "Duration_sec", "Duration", "Path", "Error"])
         for rec in sorted(records, key=sort_key):
             bpm, seconds = rec.get("bpm"), rec.get("duration")
@@ -588,8 +702,12 @@ def write_csv(records, csv_path, root):
                 "" if bpm is None else "{:.3f}".format(rec.get("confidence", 0.0)),
                 rec.get("key", ""),
                 "" if not rec.get("key") else "{:.3f}".format(rec.get("key_confidence", 0.0)),
+                rec.get("mode", ""),
                 "" if rec.get("energy") is None else str(rec["energy"]),
-                number(rec.get("loudness")), number(rec.get("gain_db"), "{:.2f}"),
+                number(rec.get("pulse"), "{:.3f}"), number(rec.get("percussive"), "{:.3f}"),
+                number(rec.get("dynamics")),
+                number(rec.get("loudness")), number(rec.get("lra")),
+                number(rec.get("gain_db"), "{:.2f}"),
                 number(rec.get("peak_db")),
                 number(seconds),
                 "" if seconds is None else "{:d}:{:02d}".format(int(seconds) // 60, int(seconds) % 60),
@@ -618,6 +736,97 @@ def write_playlist(records, playlist_path, root, low, high, min_confidence,
                 int(rec.get("duration") or 0), rec.get("artist", ""),
                 rec.get("title", ""), rec["bpm"]))
             handle.write(os.path.relpath(rec["path"], root) + "\n")
+    return picked
+
+
+def scale(value, low, high, default=0.5):
+    """Map a measurement onto 0-1 between two anchors, clamped."""
+    if value is None:
+        return default
+    return max(0.0, min(1.0, (value - low) / (high - low)))
+
+
+def cadence_fit(bpm, cadence):
+    """
+    How well a tempo matches a target step rate, 0-1.
+
+    A runner lands on the beat, on every second beat, or takes two steps to the
+    beat, so the track's double and half count too -- discounted, because a
+    half-time match is a weaker pull than the real thing.
+    """
+    best = 0.0
+    for candidate, discount in ((bpm, 1.0), (bpm * 2.0, 0.90), (bpm / 2.0, 0.85)):
+        best = max(best, math.exp(
+            -((candidate - cadence) / RUN_CADENCE_TOLERANCE) ** 2) * discount)
+    return best
+
+
+def score_run(record, cadence):
+    """
+    0-1 fitness as a feel-good running track, with the parts that made it.
+
+    Deliberately not a function of loudness: how hard a record was mastered says
+    nothing about whether it carries a run. Returns None for a track that was
+    never measured with the rhythm features.
+    """
+    if record.get("bpm") is None or record.get("pulse") is None:
+        return None
+
+    # A confidently major key reads as bright, a confidently minor one as not; an
+    # unsure reading stays near the middle rather than voting on noise.
+    raw_mode = {"major": 1.0, "minor": 0.35}.get(record.get("mode"), 0.6)
+    mode_score = 0.6 + (raw_mode - 0.6) * min(1.0, record.get("key_confidence") or 0.0)
+
+    # Loudness range if ffmpeg gave us one, otherwise the in-window RMS spread.
+    swing = record.get("lra")
+    if swing is None:
+        swing = record.get("dynamics")
+
+    parts = {
+        "cadence": cadence_fit(record["bpm"], cadence),
+        "pulse": scale(record.get("pulse"), 0.25, 0.75),
+        "percussive": scale(record.get("percussive"), 0.10, 0.35),
+        "valence": 0.6 * mode_score + 0.4 * scale(record.get("centroid_hz"), 700.0, 3500.0),
+        "consistency": 1.0 - scale(swing, 3.0, 14.0),
+    }
+    return sum(RUN_WEIGHTS[name] * value for name, value in parts.items()), parts
+
+
+def write_run_mix(records, playlist_path, root, cadence, top, min_confidence):
+    """The best-scoring tracks for a run, best first, one entry per song."""
+    scored = []
+    for rec in records:
+        if (rec.get("confidence", 0.0) < min_confidence
+                or (rec.get("duration") or 0.0) < RUN_MIN_DURATION):
+            continue
+        result = score_run(rec, cadence)
+        if result:
+            scored.append((result[0], rec))
+
+    # One entry per song: the same track off a single and off an album is one song.
+    best = {}
+    for score, rec in scored:
+        signature = ((rec.get("artist") or "").strip().lower(),
+                     (rec.get("title") or "").strip().lower())
+        if signature not in best or score > best[signature][0]:
+            best[signature] = (score, rec)
+    picked = sorted(best.values(), key=lambda pair: -pair[0])[:top]
+
+    with open(playlist_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write("#EXTM3U\n")
+        handle.write("#PLAYLIST:Run mix {:g} spm\n".format(cadence))
+        for score, rec in picked:
+            handle.write("#EXTINF:{},{} - {} [{:.0f} BPM, score {:.2f}]\n".format(
+                int(rec.get("duration") or 0), rec.get("artist", ""),
+                rec.get("title", ""), rec["bpm"], score))
+            handle.write(os.path.relpath(rec["path"], root) + "\n")
+
+    scorable = len(scored)
+    print("Wrote {} ({} tracks, best {} of {} scorable, cadence {:g} spm)".format(
+        playlist_path, len(picked), len(picked), scorable, cadence))
+    if not scorable and records:
+        print("  nothing scorable yet: the rhythm measures arrive with the next full "
+              "run, which re-analyses tracks measured by an older version")
     return picked
 
 
@@ -704,6 +913,14 @@ def main():
     parser.add_argument("--bands", action="store_true",
                         help="write the default ladder of BPM playlists: " +
                              ", ".join("{} {:g}-{:g}".format(*b) for b in DEFAULT_BANDS))
+    parser.add_argument("--run-mix", nargs="?", const="run_mix.m3u8", default=None,
+                        metavar="FILE",
+                        help="write a ranked feel-good running playlist "
+                             "(default filename: run_mix.m3u8)")
+    parser.add_argument("--cadence", type=float, default=170.0,
+                        help="target steps per minute for --run-mix (default: 170)")
+    parser.add_argument("--top", type=int, default=60,
+                        help="how many tracks --run-mix keeps (default: 60)")
     parser.add_argument("--playlists-only", action="store_true",
                         help="build the playlists from the cache alone: no library "
                              "walk, no analysis, no CSV")
@@ -742,6 +959,9 @@ def main():
             print("Wrote {} ({} tracks between {:g} and {:g} BPM)".format(
                 playlist_path, len(picked), args.low, args.high))
         write_bands(records, bands, root, args.min_confidence)
+        if args.run_mix:
+            write_run_mix(records, os.path.join(root, args.run_mix), root,
+                          args.cadence, args.top, args.min_confidence)
         return 0
 
     files = find_audio_files(root)
@@ -751,10 +971,21 @@ def main():
     if args.retry_failed:
         cached = {p: r for p, r in cached.items() if not r.get("error")}
 
-    pending = [f for f in files if f not in cached]
+    # A record written before the current FEATURE_VERSION is missing measurements
+    # this build knows how to take, so it is re-analysed like a new file. Errors are
+    # left alone: retrying those is what --retry-failed is for.
+    def outdated(path):
+        record = cached.get(path)
+        return (record is not None and not record.get("error")
+                and record.get("features", 1) < FEATURE_VERSION)
+
+    pending = [f for f in files if f not in cached or outdated(f)]
+    stale = sum(1 for f in pending if f in cached)
     todo = pending[:args.limit] if args.limit else pending
-    print("{} already measured, {} to analyse".format(len(files) - len(pending), len(todo)),
-          flush=True)
+    print("{} already measured, {} to analyse ({} new, {} re-measured for the "
+          "newer features)".format(len(files) - len(pending), len(todo),
+                                   len(todo) - min(stale, len(todo)),
+                                   min(stale, len(todo))), flush=True)
 
     if todo:
         # Threads, not processes: each worker mostly waits on ffmpeg, and librosa's
@@ -769,8 +1000,10 @@ def main():
                     record = future.result()
                 except Exception as exc:
                     record = {"path": path, "bpm": None, "confidence": 0.0, "duration": None,
-                              "key": "", "key_confidence": 0.0, "energy": None,
-                              "loudness": None, "peak_db": None, "gain_db": None,
+                              "key": "", "key_confidence": 0.0, "mode": "", "energy": None,
+                              "pulse": None, "percussive": None, "dynamics": None,
+                              "centroid_hz": None, "loudness": None, "peak_db": None,
+                              "gain_db": None, "lra": None, "features": FEATURE_VERSION,
                               "error": "worker failed: {}".format(exc)[:180],
                               "title": os.path.basename(path), "artist": "", "album": ""}
                 cached[path] = record
@@ -799,6 +1032,10 @@ def main():
             playlist_path, len(picked), args.low, args.high))
 
     write_bands(records, bands, root, args.min_confidence)
+
+    if args.run_mix:
+        write_run_mix(records, os.path.join(root, args.run_mix), root,
+                      args.cadence, args.top, args.min_confidence)
 
     if args.tag or args.tag_dry_run:
         written, unchanged, failed = tag_library(

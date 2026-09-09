@@ -113,6 +113,8 @@ music-index --low 90 --high 120 --playlist chill.m3u8
 music-index --bands                # a ladder of BPM playlists instead of just one
 music-index --band Run=130-150 --band Sprint=150-180
 music-index --playlists-only --bands   # rebuild playlists from the cache, no analysis
+music-index --run-mix              # ranked running playlist, not just a BPM window
+music-index --run-mix --cadence 165 --top 80
 music-index --root ~/other-library # point it at a different library
 ```
 
@@ -127,12 +129,47 @@ as well.
 analysis, no CSV. That is the flag for re-cutting playlists at different tempos,
 and it returns in well under a second.
 
+#### Why BPM alone picks the wrong songs
+
+A BPM window will hand you calm music, and the energy rating does not save you:
+Birdy's *Wild Horses* and Basshunter's *Dota* both score 9, because energy leans on
+loudness, which is a fact about the mastering rather than about the music. Two
+level-independent measures separate them:
+
+| Track | BPM | Energy | Pulse | Percussive |
+|---|---|---|---|---|
+| Alela Diane — Heavy Walls | 112 | 7 | **0.19** | 0.11 |
+| Birdy — Wild Horses | 112 | 9 | **0.41** | 0.17 |
+| AC/DC — Shoot To Thrill | 144 | 9 | 0.55 | **0.40** |
+| Basshunter — Dota | 144 | 9 | **0.78** | 0.26 |
+
+`Pulse` is how far a steady beat rises out of the onset envelope's autocorrelation;
+`Percussive` is the percussive share of a harmonic/percussive split, which catches
+AC/DC, whose pulse is swung but whose drums are not.
+
+`--run-mix` ranks on those rather than filtering on tempo alone:
+
+```
+0.35  cadence fit    tempo, or its double or half, against --cadence (default 170 spm)
+0.25  pulse          is there a beat to run to
+0.20  percussive     are there drums, or strings and pads
+0.10  valence        major/minor, weighted by how sure the key is, plus brightness
+0.10  consistency    EBU R128 loudness range: a long quiet intro breaks a run
+```
+
+Tracks under 2.5 minutes are dropped, the same song on two albums is entered once,
+and the playlist is written best-first. Cadence fit counts a track's double and half
+tempo too, discounted — a runner lands on the beat or on every second one — so an
+85 BPM track is a legitimate match for a 170 spm cadence.
+
 Output lands next to the library root:
 
 ```
-bpm_index.csv          every track: title, artist, album, BPM, key, energy, path
+bpm_index.csv          every track: BPM, key, mode, energy, pulse, percussive,
+                       dynamics, LUFS, LRA, ReplayGain, true peak, duration, path
 running_130_160.m3u8   the BPM window as a playlist, slowest track first
 run_130_150.m3u8       one file per --band / --bands window, same shape
+run_mix.m3u8           --run-mix, ranked best-first
 .bpm_cache.jsonl       append-only cache, one record per track
 ```
 
@@ -145,6 +182,10 @@ The cache is the point. It is flushed after every track, so an interrupted run �
 a reboot, a Ctrl-C, a pCloud stall — costs only the handful of tracks in flight.
 Re-running skips everything already measured, so adding music next month costs
 the new tracks and nothing else. Just run `music-index` again.
+
+New measurements do not need `--rescan` either: each cached record carries the
+feature version that wrote it, and a record older than the running build is
+re-analysed like a new file, errors excepted.
 
 `--rescan` is the one flag that throws that away and re-analyses the whole
 library from scratch; `--retry-failed` is the gentler one, retrying only the
