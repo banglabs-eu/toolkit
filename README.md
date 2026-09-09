@@ -246,6 +246,12 @@ written to your music until you run `music-index --tag`. After tagging, rescan t
 library in the player (Strawberry: Tools -> Full collection rescan) so it re-reads the
 tags it already cached.
 
+`--tag` writes `BPM`, `INITIALKEY`, `ENERGYLEVEL`, `PULSE`, `PERCUSSIVE`,
+`DYNAMICRANGE` and the two ReplayGain fields, using each format's own conventions:
+Vorbis comments on FLAC and Ogg, `TBPM`/`TKEY` plus `TXXX` frames on MP3, and iTunes
+atoms on MP4. No player has a column for pulse or percussive, but a smart playlist
+can read them, and they are what separates a ballad from a running track.
+
 The cache is the point. It is flushed after every track, so an interrupted run —
 a reboot, a Ctrl-C, a pCloud stall — costs only the handful of tracks in flight.
 Re-running skips everything already measured, so adding music next month costs

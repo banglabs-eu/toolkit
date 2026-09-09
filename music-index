@@ -529,6 +529,14 @@ def tag_values(record):
         values["key"] = record["key"]
     if record.get("energy") is not None:
         values["energy"] = str(record["energy"])
+    # No player has a column for these, but they cost nothing to carry and they are
+    # what a smart playlist would need to tell a ballad from a running track.
+    if record.get("pulse") is not None:
+        values["pulse"] = "{:.2f}".format(record["pulse"])
+    if record.get("percussive") is not None:
+        values["percussive"] = "{:.2f}".format(record["percussive"])
+    if record.get("dynamics") is not None:
+        values["dynamics"] = "{:.1f}".format(record["dynamics"])
     if record.get("gain_db") is not None:
         values["replaygain_track_gain"] = "{:.2f} dB".format(record["gain_db"])
     if record.get("peak_db") is not None:
@@ -556,6 +564,8 @@ def write_tags(path, values):
     if isinstance(audio, (FLAC, OggVorbis)):
         # Vorbis comments: plain uppercase keys.
         mapping = {"bpm": "BPM", "key": "INITIALKEY", "energy": "ENERGYLEVEL",
+                   "pulse": "PULSE", "percussive": "PERCUSSIVE",
+                   "dynamics": "DYNAMICRANGE",
                    "replaygain_track_gain": "REPLAYGAIN_TRACK_GAIN",
                    "replaygain_track_peak": "REPLAYGAIN_TRACK_PEAK"}
         for name, value in values.items():
@@ -570,6 +580,8 @@ def write_tags(path, values):
             audio["tmpo"] = [int(values["bpm"])]
             changed = True
         freeform = {"key": "initialkey", "energy": "energylevel",
+                    "pulse": "pulse", "percussive": "percussive",
+                    "dynamics": "dynamicrange",
                     "replaygain_track_gain": "replaygain_track_gain",
                     "replaygain_track_peak": "replaygain_track_peak"}
         for name, atom in freeform.items():
@@ -596,7 +608,9 @@ def write_tags(path, values):
         # ReplayGain and energy have no standard frame; TXXX is the convention.
         for name, description in (("replaygain_track_gain", "REPLAYGAIN_TRACK_GAIN"),
                                   ("replaygain_track_peak", "REPLAYGAIN_TRACK_PEAK"),
-                                  ("energy", "ENERGYLEVEL")):
+                                  ("energy", "ENERGYLEVEL"), ("pulse", "PULSE"),
+                                  ("percussive", "PERCUSSIVE"),
+                                  ("dynamics", "DYNAMICRANGE")):
             if name not in values:
                 continue
             existing = next((f for f in id3.getall("TXXX") if f.desc == description), None)
