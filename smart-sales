@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# smart-sales — Generate buyer-ready SMART health summary for a drive resale listing.
+# Usage: sudo smart-sales /dev/sdX [-o output-dir]
+#
+# Produces two files in output-dir (default: ~):
+#   <model>-<serial>-smart.txt    Full `smartctl -x` report (for buyer verification)
+#   <model>-<serial>-summary.md   Short markdown summary suitable for a listing
+#
+# Works on SATA SSDs and HDDs. Auto-falls back to -d sat for USB-SATA bridges.
+
+set -euo pipefail
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+die()  { echo -e "${RED}Error: $*${RESET}" >&2; exit 1; }
+warn() { echo -e "${YELLOW}$*${RESET}"; }
+info() { echo -e "${GREEN}$*${RESET}"; }
+
+# --- Args ---
+
+DEVICE=""
+OUTDIR=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -o|--output) OUTDIR="$2"; shift 2 ;;
+        -h|--help)
+            sed -n '2,9p' "$0" | sed 's/^# \?//'
+            exit 0 ;;
+        /dev/*) DEVICE="$1"; shift ;;
+        *) die "Unknown arg: $1 (try --help)" ;;
+    esac
+done
+
+[[ -n "$DEVICE" ]] || die "no device specified. Try: smart-sales /dev/sdX"
+[[ -b "$DEVICE" ]] || die "$DEVICE is not a block device"
+[[ $EUID -eq 0 ]] || die "must run as root (sudo smart-sales $DEVICE)"
+
+for cmd in smartctl jq; do
+    command -v "$cmd" >/dev/null || die "$cmd not installed (sudo apt install smartmontools jq)"
+done
+
+# Default output dir: home of the invoking user (handles sudo)
+if [[ -z "$OUTDIR" ]]; then
+    SUDO_USER="${SUDO_USER:-$USER}"
+    OUTDIR=$(eval echo "~$SUDO_USER")
+fi
+[[ -d "$OUTDIR" ]] || die "output dir does not exist: $OUTDIR"
+
+# --- smartctl probe ---
+
+SMART_FLAGS=()
+if ! smartctl -i "$DEVICE" >/dev/null 2>&1; then
+    if smartctl -d sat -i "$DEVICE" >/dev/null 2>&1; then
+        SMART_FLAGS=(-d sat)
+        info "USB bridge detected — using -d sat passthrough"
+    else
+        die "smartctl cannot read $DEVICE — bridge does not pass SMART. Try a UAS-capable enclosure or direct SATA."
+    fi
+fi
+
+# Pull JSON for parsing + text for archival.
+# smartctl exit code is a bitmask — bits 0-1 are fatal (cmdline/device errors),
+# bits 2-7 are non-fatal warnings (e.g. couldn't read self-test log). Ignore the
+# exit code and validate the output by checking for required JSON fields instead.
+JSON=$(smartctl "${SMART_FLAGS[@]}" -jx "$DEVICE" 2>/dev/null || true)
+if ! echo "$JSON" | jq -e '.model_name // .scsi_model_name' >/dev/null 2>&1; then
+    die "smartctl produced no usable data for $DEVICE"
+fi
+
+# --- Identify drive ---
+
+MODEL=$(echo "$JSON" | jq -r '.model_name // .scsi_model_name // "Unknown"')
+SERIAL=$(echo "$JSON" | jq -r '.serial_number // "unknown"')
+CAPACITY_BYTES=$(echo "$JSON" | jq -r '.user_capacity.bytes // 0')
+ROTATION=$(echo "$JSON" | jq -r '.rotation_rate // -1')
+FORM_FACTOR=$(echo "$JSON" | jq -r '.form_factor.name // ""')
+HEALTH=$(echo "$JSON" | jq -r '.smart_status.passed // false')
+
+CAPACITY_GB=$(awk -v b="$CAPACITY_BYTES" 'BEGIN{printf "%.0f", b/1e9}')
+
+# Drive type: rotation_rate=0 means SSD; >0 means RPM
+if [[ "$ROTATION" == "0" ]]; then
+    TYPE="SSD"
+elif [[ "$ROTATION" -gt 0 ]] 2>/dev/null; then
+    TYPE="HDD (${ROTATION} RPM)"
+else
+    TYPE="Unknown"
+fi
+
+# --- Attribute extraction ---
+# Returns the raw value of an attribute by name OR id. Empty if absent.
+attr_raw() {
+    echo "$JSON" | jq -r ".ata_smart_attributes.table[]? | select(.name==\"$1\" or .id==$2) | .raw.value" | head -1
+}
+# Returns the normalized value (typically 100=new, decreases with wear)
+attr_norm() {
+    echo "$JSON" | jq -r ".ata_smart_attributes.table[]? | select(.name==\"$1\" or .id==$2) | .value" | head -1
+}
+
+POH=$(attr_raw "Power_On_Hours" 9)
+PWC=$(attr_raw "Power_Cycle_Count" 12)
+RSC=$(attr_raw "Reallocated_Sector_Ct" 5)
+PSC=$(attr_raw "Current_Pending_Sector" 197)
+UDC=$(attr_raw "UDMA_CRC_Error_Count" 199)
+RUC=$(attr_raw "Reported_Uncorrect" 187)
+TLW=$(attr_raw "Total_LBAs_Written" 241)
+
+# Wear indicator — try several common attribute names/IDs
+WEAR_PCT=""
+for pair in \
+    "Wear_Leveling_Count:177" \
+    "Percent_Lifetime_Remain:202" \
+    "SSD_Life_Left:231" \
+    "Media_Wearout_Indicator:233" \
+    "Remaining_Lifetime_Perc:202"
+do
+    name="${pair%:*}"; id="${pair#*:}"
+    WEAR_PCT=$(attr_norm "$name" "$id")
+    [[ -n "$WEAR_PCT" && "$WEAR_PCT" != "null" ]] && break
+done
+
+# Convert Total_LBAs_Written to TB (assuming 512-byte sectors — standard)
+TBW=""
+if [[ -n "$TLW" && "$TLW" != "null" ]]; then
+    TBW=$(awk -v lba="$TLW" 'BEGIN{printf "%.2f TB", lba * 512 / 1e12}')
+fi
+
+# Power-on hours → years (rough)
+POH_YEARS=""
+if [[ -n "$POH" && "$POH" != "null" ]]; then
+    POH_YEARS=$(awk -v h="$POH" 'BEGIN{printf "%.1f", h/8760}')
+fi
+
+# --- Verdicts ---
+
+if [[ "$HEALTH" == "true" ]]; then
+    HEALTH_LINE="**PASSED** ✓"
+else
+    HEALTH_LINE="**FAILED** ✗"
+fi
+
+# Helpful one-line condition assessment
+condition_note() {
+    local notes=()
+    [[ -n "$RSC" && "$RSC" != "null" && "$RSC" != "0" ]] \
+        && notes+=("⚠ ${RSC} reallocated sector(s)")
+    [[ -n "$PSC" && "$PSC" != "null" && "$PSC" != "0" ]] \
+        && notes+=("⚠ ${PSC} pending sector(s)")
+    [[ -n "$RUC" && "$RUC" != "null" && "$RUC" != "0" ]] \
+        && notes+=("⚠ ${RUC} uncorrectable error(s)")
+    [[ -n "$UDC" && "$UDC" != "null" && "$UDC" != "0" ]] \
+        && notes+=("⚠ ${UDC} UDMA CRC error(s) — check cabling")
+    if [[ ${#notes[@]} -eq 0 ]]; then
+        echo "Clean — no reallocated sectors, pending sectors, or read errors."
+    else
+        printf '%s\n' "${notes[@]}"
+    fi
+}
+
+# --- File names ---
+
+# Sanitize model + serial for filenames
+clean() { echo "$1" | tr -c 'A-Za-z0-9._-' '_' | sed 's/_\+/_/g; s/^_//; s/_$//'; }
+SLUG="$(clean "$MODEL")_$(clean "$SERIAL")"
+SMART_FILE="${OUTDIR}/${SLUG}-smart.txt"
+SUMMARY_FILE="${OUTDIR}/${SLUG}-summary.md"
+
+# --- Write full report ---
+
+smartctl "${SMART_FLAGS[@]}" -x "$DEVICE" > "$SMART_FILE" 2>&1 || true
+
+# --- Write markdown summary ---
+
+{
+    echo "# ${MODEL} — ${CAPACITY_GB} GB ${TYPE}"
+    echo
+    echo "| Field | Value |"
+    echo "|---|---|"
+    echo "| **SMART overall** | ${HEALTH_LINE} |"
+    echo "| Power-on hours | ${POH:-N/A}${POH_YEARS:+ (~${POH_YEARS} years)} |"
+    echo "| Power cycles | ${PWC:-N/A} |"
+    echo "| Reallocated sectors | ${RSC:-0} |"
+    echo "| Pending sectors | ${PSC:-0} |"
+    echo "| Uncorrectable errors | ${RUC:-0} |"
+    echo "| UDMA CRC errors | ${UDC:-0} |"
+    if [[ "$TYPE" == "SSD" ]]; then
+        echo "| Wear level remaining | ${WEAR_PCT:-N/A}${WEAR_PCT:+%} (100 = new) |"
+        echo "| Total written | ${TBW:-N/A} |"
+    fi
+    [[ -n "$FORM_FACTOR" ]] && echo "| Form factor | ${FORM_FACTOR} |"
+    echo "| Serial | \`${SERIAL}\` |"
+    echo
+    echo "## Condition"
+    echo
+    condition_note | sed 's/^/- /'
+    echo
+    echo "Full \`smartctl -x\` output: \`$(basename "$SMART_FILE")\` (attached on request)."
+} > "$SUMMARY_FILE"
+
+# --- Console output ---
+
+echo
+info "Wrote:"
+echo "  ${SMART_FILE}"
+echo "  ${SUMMARY_FILE}"
+echo
+echo "─── Summary ───"
+cat "$SUMMARY_FILE"

@@ -555,18 +555,17 @@ def stream_peers(app_re):
         return []
     peers = []
     for line in out.splitlines():
-        fields = line.split()
-        if len(fields) < 5:
+        # ss shifts its columns about — UDP listings carry no State column while
+        # listening ones do — so find the addresses by shape, not by position.
+        addrs = [m for m in (ADDR_RE.match(f) for f in line.split()) if m]
+        if len(addrs) < 2:
             continue
-        m = ADDR_RE.match(fields[4])
-        if not m:
-            continue
+        m = addrs[1]                      # local address first, peer second
         host, port = m.group(1), int(m.group(2))
         if host in ("0.0.0.0", "*", "::", "127.0.0.1"):
             continue
-        proc = fields[5] if len(fields) > 5 else ""
         pname = ""
-        pm = re.search(r'"([^"]+)"', proc)
+        pm = re.search(r'"([^"]+)"', line)
         if pm:
             pname = pm.group(1)
         score = 0

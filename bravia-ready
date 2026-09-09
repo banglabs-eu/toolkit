@@ -13,7 +13,7 @@ Target format (established by testing on an actual set, not from documentation):
     video       H.264 — HEVC is refused outright
     audio       AAC-LC, 48 kHz, stereo — AC3 refused, 96 kHz plays silently
     subtitles   sidecar .srt in UTF-16LE — UTF-8 renders as boxes
-    naming      Title (Year).mp4 + Title (Year).srt, identical basenames
+    naming      Title (Year)/Title (Year).mp4 + .srt, identical basenames
 
 Source files are read straight off the pCloud FUSE mount, encoded to a local
 scratch directory, and only copied up to the destination once complete and
@@ -791,6 +791,48 @@ def stage_source(feature, tmpdir):
     return local
 
 
+def outputs(dest_root, title):
+    """Destination paths for one film: its own directory holding .mp4 and .srt.
+
+    A film per directory keeps the sidecar next to the only film it belongs to,
+    which is what the set's USB browser expects, and stops a library of a few
+    hundred titles collapsing into one unnavigable list.
+    """
+    d = dest_root / title
+    return d / f"{title}.mp4", d / f"{title}.srt"
+
+
+def migrate_flat(dest_root, title, dry_run=False):
+    """Move an earlier flat `Title.mp4`/`.srt` pair into the title's directory.
+
+    Runs before the already-done check so a library converted under the old
+    layout is rearranged rather than re-encoded from scratch. Returns True if
+    a converted film was found there, so a dry run still reports it as done.
+    """
+    out_mp4, out_srt = outputs(dest_root, title)
+    legacy_mp4 = dest_root / f"{title}.mp4"
+    found = legacy_mp4.is_file()
+    if dry_run:
+        if found:
+            print(f"{DIM}  would move {legacy_mp4.name} into {title}/{RESET}")
+        return found
+
+    moved = []
+    for legacy, new in ((legacy_mp4, out_mp4), (dest_root / f"{title}.srt", out_srt)):
+        if not legacy.is_file() or new.exists():
+            continue
+        try:
+            new.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy), str(new))
+        except OSError as e:
+            warn(f"could not move {legacy.name} into {title}/: {e}")
+            continue
+        moved.append(new.name)
+    if moved:
+        print(f"{DIM}  moved {', '.join(moved)} into {title}/{RESET}")
+    return found
+
+
 def deliver(src, dest):
     """Copy into place on the destination, leaving nothing partial behind."""
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -923,10 +965,10 @@ def make_subtitle(item, meta, args, tmpdir, title, feature=None):
 def process_subs_only(item, args):
     """Rebuild just the .srt sidecar beside an already-converted film."""
     title = item["title"]
-    out_mp4 = args.dest / f"{title}.mp4"
-    out_srt = args.dest / f"{title}.srt"
+    out_mp4, out_srt = outputs(args.dest, title)
 
     print(f"\n{BOLD}{title}{RESET}")
+    migrate_flat(args.dest, title)
     if not out_mp4.exists():
         print(f"  {DIM}no converted .mp4 yet — skipping{RESET}")
         return "skipped"
@@ -954,20 +996,20 @@ def process_subs_only(item, args):
         except (OSError, IOError) as e:
             warn(f"delivery failed: {e}")
             return "failed"
-    print(f"  {GREEN}done{RESET} -> {out_srt.name}")
+    print(f"  {GREEN}done{RESET} -> {title}/{out_srt.name}")
     return "converted"
 
 
 def process(item, args, encoder):
     title = item["title"]
     feature = item["feature"]
-    out_mp4 = args.dest / f"{title}.mp4"
-    out_srt = args.dest / f"{title}.srt"
+    out_mp4, out_srt = outputs(args.dest, title)
 
     print(f"\n{BOLD}{title}{RESET}")
     print(f"{DIM}  source:    {rel(feature, args.source)} ({human(feature.stat().st_size)}){RESET}")
 
-    if out_mp4.exists() and not args.force:
+    legacy = migrate_flat(args.dest, title, args.dry_run)
+    if (out_mp4.exists() or legacy) and not args.force:
         print(f"  {GREEN}already done{RESET} — skipping (use --force to redo)")
         return "skipped"
 
@@ -1030,7 +1072,7 @@ def process(item, args, encoder):
         # A subtitle failure is never fatal to the film itself.
         sub_result = make_subtitle(item, meta, args, tmpdir, title, feature=src)
 
-        print(f"{DIM}  uploading to {args.dest.name}/ ...{RESET}", flush=True)
+        print(f"{DIM}  uploading to {args.dest.name}/{title}/ ...{RESET}", flush=True)
         try:
             deliver(tmp_mp4, out_mp4)
             if sub_result:
@@ -1039,7 +1081,7 @@ def process(item, args, encoder):
             warn(f"delivery failed: {e}")
             return "failed"
 
-    print(f"  {GREEN}done{RESET} -> {out_mp4.name}")
+    print(f"  {GREEN}done{RESET} -> {title}/{out_mp4.name}")
     return "converted"
 
 
@@ -1141,16 +1183,20 @@ def main():
         warn(f"{b['dir'].name}: {b['error']}")
 
     if args.list:
+        # The old flat layout counts as done too; it is moved into its own
+        # directory on the next real run rather than converted again.
+        def is_done(title):
+            return (outputs(args.dest, title)[0].exists()
+                    or (args.dest / f"{title}.mp4").exists())
+
         print()
         for item in items:
-            done = (args.dest / f"{item['title']}.mp4").exists()
-            mark = f"{GREEN}[done]{RESET}" if done else "[    ]"
+            mark = f"{GREEN}[done]{RESET}" if is_done(item["title"]) else "[    ]"
             sub = item["sub"].name if item["sub"] else f"{DIM}(embedded or none){RESET}"
             print(f"{mark} {BOLD}{item['title']}{RESET}")
             print(f"       {DIM}{item['feature'].name} — {human(item['feature'].stat().st_size)}{RESET}")
             print(f"       {DIM}subs:{RESET} {sub}")
-        outstanding = sum(1 for i in items
-                          if not (args.dest / f"{i['title']}.mp4").exists())
+        outstanding = sum(1 for i in items if not is_done(i["title"]))
         print(f"\n{len(items)} title(s), {outstanding} outstanding")
         return
 

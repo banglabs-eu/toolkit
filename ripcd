@@ -1,0 +1,551 @@
+#!/usr/bin/env python3
+"""
+ripcd.py — rip an audio CD to the pCloud music library with MusicBrainz metadata.
+
+Needs only ffmpeg/ffprobe and python3 stdlib — no abcde, no cdparanoia install.
+
+  * waits for the USB drive to spin up and report a readable TOC
+  * computes the MusicBrainz disc ID from the TOC and looks the disc up
+  * picks the correct medium when a release has several discs
+  * one bounded Paranoia-full read pass, then splits on TOC boundaries
+  * FLAC (default) or MP3, tagged, with cover art from the Cover Art Archive
+  * stages locally, verifies, then copies into pCloud and verifies again
+
+Layout:  <dest>/<Artist>/<Album>/01 Track Title.flac
+         compilations (more than one track artist) go to
+         <dest>/Compilations/<Album>/01 Artist - Title.flac instead,
+         tagged compilation=1
+
+Machine: x13-1 / Pop!_OS 24.04 / USB drive on /dev/sr0
+"""
+import argparse, base64, fcntl, hashlib, json, os, re, shutil, struct, subprocess, sys
+import tempfile, time, urllib.error, urllib.request
+
+UA = {"User-Agent": "ripcd.py/1.0 (https://github.com/banglabs-eu)"}
+DEST_DEFAULT = "/home/abk/pCloudDrive/Audio/Music/Artists"
+STAGE_DEFAULT = os.path.expanduser("~/Music/_ripstage")
+COMPILATION_DIR = "Compilations"   # where various-artist discs are filed
+BYTES_PER_SEC = 44100 * 2 * 2
+
+CDROM_DRIVE_STATUS, CDROMREADTOCHDR, CDROMREADTOCENTRY = 0x5326, 0x5305, 0x5306
+CDROMEJECT, CDROM_LOCKDOOR = 0x5309, 0x5329
+CDS = {0: "no info", 1: "no disc in tray", 2: "tray open",
+       3: "drive not ready", 4: "disc present"}
+
+
+def c(code, s):
+    return f"\033[{code}m{s}\033[0m" if sys.stdout.isatty() else s
+
+
+def note(s): print(c("1;34", "==>"), s, flush=True)
+def warn(s): print(c("1;33", "warn:"), s, file=sys.stderr, flush=True)
+def die(s):  print(c("1;31", "error:"), s, file=sys.stderr, flush=True); sys.exit(1)
+
+
+# ----------------------------------------------------------------- the disc --
+def drive_status(dev):
+    try:
+        fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return 0
+    try:
+        return fcntl.ioctl(fd, CDROM_DRIVE_STATUS, 0)
+    except OSError:
+        return 0
+    finally:
+        os.close(fd)
+
+
+def eject_disc(dev):
+    """Open the tray. Kernel ioctl first, the `eject` binary as a fallback.
+
+    Returns True only if the tray actually opened — a silent failure here
+    looks exactly like success, which is how you lose a disc to a locked door.
+    """
+    try:
+        fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            try:
+                fcntl.ioctl(fd, CDROM_LOCKDOOR, 0)   # release any door lock
+            except OSError:
+                pass
+            fcntl.ioctl(fd, CDROMEJECT, 0)
+            return True
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+    if shutil.which("eject"):
+        return subprocess.run(["eject", dev], capture_output=True).returncode == 0
+    return False
+
+
+def read_toc(dev):
+    """Return (first, last, {track: lba}, leadout_lba, [is_audio])."""
+    fd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        hdr = bytearray(2)
+        fcntl.ioctl(fd, CDROMREADTOCHDR, hdr)
+        first, last = hdr[0], hdr[1]
+
+        def entry(track):
+            e = bytearray(struct.pack("BBBBiB", track, 0, 1, 0, 0, 0))  # CDROM_LBA
+            fcntl.ioctl(fd, CDROMREADTOCENTRY, e)
+            t, adrctrl, fmt, mode, lba, dsize = struct.unpack("BBBBiB", bytes(e))
+            return lba, bool(adrctrl >> 4 & 0x4)
+
+        offsets, data_tracks = {}, []
+        for t in range(first, last + 1):
+            lba, is_data = entry(t)
+            offsets[t] = lba
+            if is_data:
+                data_tracks.append(t)
+        leadout = entry(0xAA)[0]
+        return first, last, offsets, leadout, data_tracks
+    finally:
+        os.close(fd)
+
+
+def musicbrainz_discid(first, last, offsets, leadout):
+    parts = ["%02X" % first, "%02X" % last, "%08X" % (leadout + 150)]
+    parts += ["%08X" % (offsets.get(t, -150) + 150) for t in range(1, 100)]
+    sha = hashlib.sha1("".join(parts).encode()).digest()
+    return (base64.b64encode(sha).decode()
+            .replace("+", ".").replace("/", "_").replace("=", "-"))
+
+
+def wait_for_disc(dev, timeout):
+    if not os.path.exists(dev):
+        die(f"{dev} does not exist — is the USB drive attached?")
+    if not os.access(dev, os.R_OK):
+        die(f"{dev} is not readable by you — replug the drive, or check: getfacl {dev}")
+    deadline, shown = time.time() + timeout, False
+    while time.time() < deadline:
+        st = drive_status(dev)
+        if st == 4:
+            try:
+                return read_toc(dev)
+            except OSError:
+                pass  # spun up but TOC not ready yet
+        left = int(deadline - time.time())
+        print(f"\r{c('1;34','==>')} {CDS.get(st,'unknown'):<28} ({left}s left) ",
+              end="", flush=True)
+        shown = True
+        time.sleep(2)
+    if shown:
+        print()
+    die(f"no readable audio CD in {dev} after {timeout}s")
+
+
+# -------------------------------------------------------------- the lookup --
+_last_mb = [0.0]
+
+
+def get_json(url, timeout=30, retries=4):
+    """GET some JSON, respecting MusicBrainz's 1 request/second limit.
+
+    MusicBrainz answers 503 when you go too fast; swallowing that silently
+    makes a rate limit look like "no data", which is how you end up embedding
+    a 301x301 cover when a 2800x2800 one exists.
+    """
+    for attempt in range(retries):
+        if "musicbrainz.org" in url:
+            wait = 1.1 - (time.time() - _last_mb[0])
+            if wait > 0:
+                time.sleep(wait)
+            _last_mb[0] = time.time()
+        try:
+            with urllib.request.urlopen(
+                    urllib.request.Request(url, headers=UA), timeout=timeout) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 502, 503) and attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+        except urllib.error.URLError:
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise
+
+
+def credit(ac):
+    return "".join(x["name"] + x.get("joinphrase", "") for x in ac or [])
+
+
+def lookup(discid, ntracks, interactive):
+    url = (f"https://musicbrainz.org/ws/2/discid/{discid}"
+           "?fmt=json&inc=artist-credits+recordings+release-groups")
+    try:
+        data = get_json(url)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return None
+        raise
+    releases = data.get("releases", [])
+    if not releases:
+        return None
+
+    # A release may hold several discs; keep only the medium this disc IS.
+    cands = []
+    for rel in releases:
+        for m in rel.get("media", []):
+            if discid in [d["id"] for d in m.get("discs", [])]:
+                cands.append((rel, m))
+    if not cands:  # fall back on track count
+        cands = [(rel, m) for rel in releases for m in rel.get("media", [])
+                 if m.get("track-count") == ntracks]
+    if not cands:
+        return None
+
+    if len(cands) > 1 and interactive:
+        print("\nSeveral releases match this disc:\n")
+        for i, (rel, m) in enumerate(cands, 1):
+            print(f"  {i}. {credit(rel.get('artist-credit'))} — {rel.get('title')}"
+                  f"  ({rel.get('date','?')}, {rel.get('country','?')})"
+                  f"  disc {m.get('position')}/{len(rel.get('media',[]))}")
+        while True:
+            a = input(f"\nWhich one? [1-{len(cands)}, default 1] ").strip() or "1"
+            if a.isdigit() and 1 <= int(a) <= len(cands):
+                cands = [cands[int(a) - 1]]
+                break
+    rel, m = cands[0]
+
+    rg = rel.get("release-group") or {}
+    tracks = [{"num": t["position"], "title": t["title"],
+               "artist": credit(t.get("artist-credit")) or credit(rel.get("artist-credit")),
+               "len_ms": t.get("length") or 0,
+               "recording": (t.get("recording") or {}).get("id", "")}
+              for t in m.get("tracks", [])]
+    return {"album": rel["title"], "albumartist": credit(rel.get("artist-credit")),
+            "release_group": rg.get("id", ""),
+            "date": rel.get("date", ""), "origdate": rg.get("first-release-date", ""),
+            "release": rel["id"], "discid": discid,
+            "discnumber": m.get("position", 1), "totaldiscs": len(rel.get("media", [])),
+            "totaltracks": m.get("track-count", len(tracks)), "tracks": tracks}
+
+
+def fetch_bytes(url, retries=3, timeout=60):
+    """GET raw bytes, retrying transient 5xx. Returns None if unavailable.
+
+    The Cover Art Archive intermittently 500s on images that exist; a single
+    attempt silently downgrades you to whatever smaller art you already had.
+    """
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(
+                    urllib.request.Request(url, headers=UA), timeout=timeout) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503) and attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return None
+        except Exception:
+            if attempt < retries - 1:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return None
+    return None
+
+
+def image_px(path):
+    """Longest edge of an image, or 0 if it cannot be read."""
+    r = run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path])
+    try:
+        w, h = (int(x) for x in r.stdout.strip().split("x")[:2])
+        return max(w, h)
+    except Exception:
+        return 0
+
+
+def fetch_cover(release_id, path, release_group="", good_enough=1000):
+    """Fetch the best front cover we can find.
+
+    The exact release often carries only a small upload — this album's matching
+    release has a 301x300 front, while a sibling pressing in the same
+    release-group has 2800x2800 of the same artwork. So try the release first,
+    then its siblings, and keep the highest-resolution front image.
+    """
+    candidates = [release_id]
+    if release_group:
+        try:
+            rg = get_json("https://musicbrainz.org/ws/2/release"
+                          f"?release-group={release_group}&fmt=json&limit=100")
+            candidates += [r["id"] for r in rg.get("releases", [])
+                           if r["id"] != release_id]
+        except Exception as e:
+            warn(f"could not list sibling releases for better art: {e}")
+
+    best_px, best = 0, None
+    tmp = path + ".cand"
+    for i, rid in enumerate(candidates[:8]):
+        if i:
+            time.sleep(1.0)                     # MusicBrainz/CAA rate limit
+        for suffix in ("front-1200", "front"):
+            data = fetch_bytes(
+                f"https://coverartarchive.org/release/{rid}/{suffix}")
+            if data is None:
+                continue
+            if data[:2] != b"\xff\xd8":         # not a JPEG
+                continue
+            with open(tmp, "wb") as fh:
+                fh.write(data)
+            px = image_px(tmp)
+            if px > best_px:
+                best_px, best = px, data
+            break                                # one size per release is enough
+        if best_px >= good_enough:
+            break
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    if best is None:
+        return 0, 0
+    with open(path, "wb") as fh:
+        fh.write(best)
+    return len(best), best_px
+
+
+# --------------------------------------------------------------- the ripping --
+def munge(s):
+    s = s.replace("/", "_").replace("?", "_")
+    s = re.sub(r'[:\\*"<>|]', "", s)
+    return re.sub(r"\s+", " ", s).strip().rstrip(".") or "Unknown"
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def read_disc(dev, wav, seconds, speed=0):
+    """One bounded read pass.
+
+    The -t bound is REQUIRED: ffmpeg's libcdio demuxer does not reliably EOF at
+    the lead-out and will otherwise spin past the end of the disc writing
+    garbage until the filesystem fills.
+    """
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y",
+           "-f", "libcdio", "-paranoia_mode", "full"]
+    if speed:
+        cmd += ["-speed", str(speed)]
+    cmd += ["-i", dev, "-t", f"{seconds:.6f}", "-c:a", "pcm_s16le", wav]
+    r = run(cmd)
+    if r.returncode != 0:
+        die("CD read failed:\n" + r.stderr[-1500:])
+    got = os.path.getsize(wav)
+    want = int(seconds * BYTES_PER_SEC)
+    if got < want * 0.98:
+        die(f"short read: got {got} bytes, expected ~{want}")
+    return got
+
+
+def encode(wav, bounds, meta, outdir, fmt, cover, va):
+    # `va` also means: this is a compilation (tagged, and filed separately)
+    os.makedirs(outdir, exist_ok=True)
+    made = []
+    for t in meta["tracks"]:
+        i = t["num"]
+        if i not in bounds:
+            warn(f"track {i} has no TOC entry — skipped")
+            continue
+        start, end = bounds[i]
+        stem = (f'{i:02d} {munge(t["artist"])} - {munge(t["title"])}' if va
+                else f'{i:02d} {munge(t["title"])}')
+        if meta["totaldiscs"] > 1:
+            stem = f'{meta["discnumber"]}-{stem}'
+        dst = os.path.join(outdir, f"{stem}.{fmt}")
+
+        cmd = ["ffmpeg", "-hide_banner", "-v", "error", "-nostdin", "-y",
+               "-ss", f"{start:.6f}", "-to", f"{end:.6f}", "-i", wav]
+        if cover:
+            cmd += ["-i", cover, "-map", "0:a", "-map", "1:v",
+                    "-c:v", "mjpeg", "-disposition:v", "attached_pic"]
+        else:
+            cmd += ["-map", "0:a"]
+        cmd += (["-c:a", "flac", "-compression_level", "8"] if fmt == "flac"
+                else ["-c:a", "libmp3lame", "-q:a", "0"])
+        tags = {"title": t["title"], "artist": t["artist"],
+                "album": meta["album"], "album_artist": meta["albumartist"],
+                "date": meta["date"], "originaldate": meta["origdate"],
+                "track": f'{i}/{meta["totaltracks"]}',
+                "disc": f'{meta["discnumber"]}/{meta["totaldiscs"]}',
+                "MUSICBRAINZ_ALBUMID": meta["release"],
+                "MUSICBRAINZ_DISCID": meta["discid"],
+                "MUSICBRAINZ_TRACKID": t["recording"]}
+        if va:
+            tags["compilation"] = "1"
+        for k, v in tags.items():
+            if v:
+                cmd += ["-metadata", f"{k}={v}"]
+        cmd.append(dst)
+        r = run(cmd)
+        if r.returncode != 0:
+            die(f"encoding track {i} failed:\n{r.stderr[-1000:]}")
+        print(f"    {os.path.getsize(dst)/1048576:5.1f} MB  {os.path.basename(dst)}")
+        made.append(dst)
+    return made
+
+
+def verify_decode(files):
+    bad = [f for f in files
+           if run(["ffmpeg", "-hide_banner", "-v", "error", "-i", f, "-f", "null", "-"]).returncode]
+    return bad
+
+
+def publish(src_root, dest):
+    r = subprocess.run(["rsync", "-a", "--info=progress2", src_root + "/", dest + "/"])
+    if r.returncode != 0:
+        return False, []
+    bad = []
+    for dirpath, _, names in os.walk(src_root):
+        for n in names:
+            s = os.path.join(dirpath, n)
+            rel = os.path.relpath(s, src_root)
+            d = os.path.join(dest, rel)
+            if not os.path.isfile(d) or os.path.getsize(s) != os.path.getsize(d):
+                bad.append(rel)
+    return True, bad
+
+
+# ---------------------------------------------------------------------- main --
+def rip_once(a):
+    note(f"Waiting for a disc in {a.device} ...")
+    first, last, offsets, leadout, data_tracks = wait_for_disc(a.device, a.wait)
+    ntracks = last - first + 1
+    if data_tracks and len(data_tracks) == ntracks:
+        die("this is a data disc, not an audio CD")
+    if data_tracks:
+        warn(f"ignoring data track(s): {data_tracks}")
+
+    bounds = {t: ((offsets[t]) / 75.0,
+                  (offsets[t + 1] if t < last else leadout) / 75.0)
+              for t in range(first, last + 1) if t not in data_tracks}
+    total = leadout / 75.0
+    discid = musicbrainz_discid(first, last, offsets, leadout)
+    note(f"{ntracks} tracks, {int(total//60)}:{int(total%60):02d} — disc ID {discid}")
+
+    note("Looking the disc up on MusicBrainz ...")
+    meta = lookup(discid, ntracks, not a.batch)
+    if not meta:
+        die("this disc is not in MusicBrainz.\n"
+            "       Add it at https://musicbrainz.org/cdtoc/attach and re-run, "
+            "or rip with -o to a scratch folder and tag by hand.")
+
+    va = len({t["artist"] for t in meta["tracks"]}) > 1
+    note(f'{meta["albumartist"]} — {meta["album"]} ({meta["date"]}), '
+         f'disc {meta["discnumber"]}/{meta["totaldiscs"]}'
+         + ("  [various artists]" if va else ""))
+    for t in meta["tracks"]:
+        print(f'    {t["num"]:>2}  ' + (f'{t["artist"]} - ' if va else "") + t["title"])
+
+    if not a.batch:
+        if (input("\nRip this? [Y/n] ").strip().lower() or "y") not in ("y", "yes"):
+            note("Cancelled — nothing written.")
+            return 0
+
+    # destination checks before spending 15 minutes on a read
+    if not os.path.ismount(os.path.expanduser("~/pCloudDrive")):
+        die("~/pCloudDrive is not mounted — start the pCloud client first")
+    if not os.path.isdir(a.dest) or not os.access(a.dest, os.W_OK):
+        die(f"destination {a.dest} is missing or not writable")
+
+    os.makedirs(a.stage, exist_ok=True)
+    free_mb = shutil.disk_usage(a.stage).free // 1048576
+    if free_mb < 1500:
+        die(f"only {free_mb}MB free at {a.stage} — need ~1.5GB")
+    run_dir = tempfile.mkdtemp(prefix="rip-", dir=a.stage)
+
+    cover = os.path.join(run_dir, "cover.jpg")
+    n, px = fetch_cover(meta["release"], cover, meta.get("release_group", ""))
+    note(f"Cover art: {px}x{px}, {n//1024} KB" if n else "Cover art: none found")
+    if n and px < 500:
+        warn(f"cover art is only {px}px — that is the best on the Cover Art Archive")
+    if not n:
+        cover = None
+
+    wav = os.path.join(run_dir, "disc.wav")
+    note(f"Reading the disc (bounded to {total:.2f}s) — this takes a while ...")
+    read_disc(a.device, wav, total, a.speed)
+
+    # A compilation is filed under Compilations/<Album>, not under the
+    # release artist — matches how the rest of the library is organised.
+    folder = COMPILATION_DIR if va else munge(meta["albumartist"])
+    outdir = os.path.join(run_dir, "out", folder, munge(meta["album"]))
+    note(f"Encoding to {a.format} ...")
+    files = encode(wav, bounds, meta, outdir, a.format, cover, va)
+    if not files:
+        die(f"no tracks encoded; staging kept at {run_dir}")
+
+    os.remove(wav)          # the wav is only an intermediate; only FLAC/MP3 ships
+
+    note("Verifying every encoded file decodes ...")
+    bad = verify_decode(files)
+    if bad:
+        die("these files failed to decode:\n  " + "\n  ".join(bad)
+            + f"\n       staging kept at {run_dir}")
+    note(f"{len(files)} files decode cleanly")
+
+    if cover:
+        shutil.copy(cover, os.path.join(outdir, "cover.jpg"))
+
+    note(f"Copying into {a.dest} ...")
+    ok, mismatched = publish(os.path.join(run_dir, "out"), a.dest)
+    if not ok:
+        warn(f"copy failed — your rip is safe at {outdir}")
+        return 1
+    if mismatched:
+        warn("these files did not verify at the destination:\n  " + "\n  ".join(mismatched))
+        warn(f"staging kept at {run_dir}")
+        return 1
+
+    note(f'Verified in the library: {folder}/{munge(meta["album"])}')
+    if a.keep:
+        note(f"Staging kept at {run_dir}")
+    else:
+        shutil.rmtree(run_dir, ignore_errors=True)
+    if a.eject:
+        if eject_disc(a.device):
+            note("Disc ejected.")
+        else:
+            warn("could not eject — take the disc out by hand")
+    note("Done.")
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(description="Rip an audio CD into the pCloud music library.")
+    p.add_argument("-f", "--format", choices=("flac", "mp3"), default="flac")
+    p.add_argument("-d", "--device", default="/dev/sr0")
+    p.add_argument("-o", "--dest", default=DEST_DEFAULT)
+    p.add_argument("-s", "--stage", default=STAGE_DEFAULT)
+    p.add_argument("-w", "--wait", type=int, default=60, help="seconds to wait for spin-up")
+    p.add_argument("--speed", type=int, default=0, help="drive read speed (0 = max)")
+    p.add_argument("-b", "--batch", action="store_true", help="no prompts, take the first match")
+    p.add_argument("-l", "--loop", action="store_true", help="offer another disc when done")
+    p.add_argument("-k", "--keep", action="store_true", help="keep local staging")
+    p.add_argument("-n", "--no-eject", dest="eject", action="store_false", default=True,
+                   help="leave the disc in the drive (default: eject when done)")
+    a = p.parse_args()
+
+    for tool in ("ffmpeg", "ffprobe", "rsync"):
+        if not shutil.which(tool):
+            die(f"{tool} is not installed")
+
+    rc = 0
+    while True:
+        try:
+            rc = rip_once(a) or rc
+        except KeyboardInterrupt:
+            print()
+            die("interrupted")
+        if not a.loop:
+            return rc
+        if (input("\nInsert the next CD and press Enter (or 'q' to quit): ")
+                .strip().lower().startswith("q")):
+            return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

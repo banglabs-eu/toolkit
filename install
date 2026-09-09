@@ -17,6 +17,8 @@ dpkg -s ffmpeg     &>/dev/null || PACKAGES+=(ffmpeg)
 dpkg -s tesseract-ocr  &>/dev/null || PACKAGES+=(tesseract-ocr)
 dpkg -s python3-pil    &>/dev/null || PACKAGES+=(python3-pil)
 dpkg -s python3-numpy  &>/dev/null || PACKAGES+=(python3-numpy)
+# ripcd: ffmpeg (already above) reads the CD and encodes; rsync copies to pCloud.
+dpkg -s rsync          &>/dev/null || PACKAGES+=(rsync)
 # pslag: ffmpeg reads the video, numpy does the arithmetic. Both above.
 # music-index: ffmpeg decodes the audio (above). librosa and mutagen are pip-only,
 # so the tool builds its own venv under ~/.local/share/bpm-scan on first run.
@@ -36,6 +38,9 @@ echo "  cleanusb — linked to $BIN_DIR"
 sudo ln -sf "$SCRIPT_DIR/bravia-ready" "$BIN_DIR/bravia-ready"
 echo "  bravia-ready — linked to $BIN_DIR"
 
+sudo ln -sf "$SCRIPT_DIR/ripcd" "$BIN_DIR/ripcd"
+echo "  ripcd — linked to $BIN_DIR"
+
 sudo ln -sf "$SCRIPT_DIR/pslag" "$BIN_DIR/pslag"
 echo "  pslag — linked to $BIN_DIR"
 
@@ -46,5 +51,6 @@ echo ""
 info "Done!"
 echo "  Usage: sudo cleanusb"
 echo "         bravia-ready --list"
+echo "         ripcd"
 echo "         pslag rig --label local"
 echo "         music-index"

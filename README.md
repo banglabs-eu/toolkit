@@ -50,7 +50,17 @@ bravia-ready --subs-only            # rebuild .srt sidecars, leave the .mp4s alo
 
 Per film it picks the largest video file that isn't bonus material, renames it to
 `Title (Year)`, finds the best subtitle (sidecar, `Subs/`, or embedded), and produces
-a matched `.mp4` + `.srt` pair.
+a matched `.mp4` + `.srt` pair in a directory of its own:
+
+```
+Bravia-Ready/
+  Spy Game (2001)/
+    Spy Game (2001).mp4
+    Spy Game (2001).srt
+```
+
+A library converted under the earlier flat layout is moved into this arrangement on
+the next run — the files are moved, not re-encoded.
 
 The target format, and why each part matters:
 
@@ -60,7 +70,7 @@ The target format, and why each part matters:
 | Video | H.264 | HEVC is refused: "File format not supported" |
 | Audio | AAC-LC, **48 kHz**, stereo | AC3 refused; 96 kHz gives picture and **silence** |
 | Subtitles | sidecar `.srt`, **UTF-16LE** | UTF-8 renders as boxes — bytes get read in pairs |
-| Naming | `Title (Year).mp4` + `.srt` | simple players need identical basenames |
+| Naming | `Title (Year)/Title (Year).mp4` + `.srt` | simple players need identical basenames |
 | Resolution | fits inside 1920×1080 | 4K H.264 busts the decoder's level and is refused |
 
 Two of those three failures are silent, so the script verifies its own output and
@@ -95,6 +105,62 @@ speakers can't reproduce that band and it only eats headroom.
 Uses VAAPI (`/dev/dri/renderD128`) when available, falling back to libx264. Needs `ffmpeg`.
 
 Full write-up: <https://snippets.eu/post/bang/usb-movies-on-sony-tvs>
+
+### ripcd
+
+Rips an audio CD to the pCloud music library, tagged from MusicBrainz. Writes to
+`pCloudDrive/Audio/Music/Artists`.
+
+```bash
+ripcd                      # identify the disc, confirm, rip, eject
+ripcd -l                   # box set — ejects and waits for the next disc
+ripcd -b                   # no prompts, accept the first metadata match
+ripcd -f mp3               # MP3 V0 instead of FLAC
+ripcd -o DIR               # somewhere other than the library
+ripcd -n                   # leave the disc in the drive
+```
+
+It computes the MusicBrainz disc ID from the table of contents, so identification
+is exact rather than a title guess — and a release with several discs resolves to
+the *medium* the disc actually is, which is what keeps a 2-CD set from being filed
+as two copies of disc one.
+
+Layout follows the existing library:
+
+```
+Artists/Sharon Van Etten/epic Ten/1-01 A Crime.flac
+Artists/Compilations/epic Ten/2-01 Big Red Machine - A Crime.flac
+```
+
+A disc whose tracks have more than one artist is a compilation: it goes to
+`Artists/Compilations/<Album>` with the performer in each filename and
+`compilation=1` tagged, rather than being filed under the release artist.
+Everything else goes to `<Artist>/<Album>`. Multi-disc sets get a `N-` prefix.
+
+Cover art comes from the Cover Art Archive, embedded in every track and dropped
+beside them as `cover.jpg`. The pressing matching your disc frequently has only a
+thumbnail on file — one album here had 301×300 — so it searches every release in
+the same release-group and keeps the highest-resolution front image, which found
+1200×1200 of the same artwork.
+
+Ripping is one bounded read pass with full Paranoia error recovery, split on TOC
+boundaries. **The bound matters:** ffmpeg's `libcdio` demuxer does not reliably
+stop at the lead-out, and without `-t <disc seconds>` it spins past the end of the
+disc writing garbage — it produced a 64 GB WAV from a 30-minute CD before being
+killed.
+
+Like `bravia-ready`, it works in a local scratch directory and only copies up to
+pCloud once complete: every encoded file is re-decoded to prove it is not corrupt,
+then each one is size-checked at the destination before the local copy is deleted.
+Nothing partial lands in the library, and any failure keeps the rip on local disk
+and says where. The intermediate WAV is discarded — only FLAC ships.
+
+Two APIs in the path fail intermittently and are retried rather than trusted:
+MusicBrainz answers 503 above one request per second, and the Cover Art Archive
+returns 500 on images that do exist. Swallowing either makes a rate limit look
+like "no data", which is how you end up with a 301×300 cover.
+
+Needs `ffmpeg` and `rsync`; no `abcde`, `cdparanoia` or `flac` package required.
 
 ### music-index
 
