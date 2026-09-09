@@ -110,16 +110,36 @@ music-index --retry-failed         # re-try tracks that previously failed
 music-index --tag-dry-run          # preview what would be written to the files
 music-index --tag                  # write BPM/key/gain into the files' tags
 music-index --low 90 --high 120 --playlist chill.m3u8
+music-index --bands                # a ladder of BPM playlists instead of just one
+music-index --band Run=130-150 --band Sprint=150-180
+music-index --playlists-only --bands   # rebuild playlists from the cache, no analysis
 music-index --root ~/other-library # point it at a different library
 ```
+
+`--bands` writes one playlist per window — Chill 60-90, Walk 90-110, Jog 110-130,
+Run 130-150, Sprint 150-180 — and `--band NAME=LOW-HIGH` (repeatable) defines your
+own. Band windows are half-open, so a track at exactly 130 BPM lands in Run and
+nowhere else; the single `--playlist` window stays inclusive at both ends. Asking
+for bands drops the default `running_130_160.m3u8` unless you name a `--playlist`
+as well.
+
+`--playlists-only` builds them straight from the cache: no library walk, no
+analysis, no CSV. That is the flag for re-cutting playlists at different tempos,
+and it returns in well under a second.
 
 Output lands next to the library root:
 
 ```
 bpm_index.csv          every track: title, artist, album, BPM, key, energy, path
 running_130_160.m3u8   the BPM window as a playlist, slowest track first
+run_130_150.m3u8       one file per --band / --bands window, same shape
 .bpm_cache.jsonl       append-only cache, one record per track
 ```
+
+A player showing a blank BPM column is reading the files, not the CSV: nothing is
+written to your music until you run `music-index --tag`. After tagging, rescan the
+library in the player (Strawberry: Tools -> Full collection rescan) so it re-reads the
+tags it already cached.
 
 The cache is the point. It is flushed after every track, so an interrupted run —
 a reboot, a Ctrl-C, a pCloud stall — costs only the handful of tracks in flight.

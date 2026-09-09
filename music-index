@@ -18,10 +18,14 @@ Usage:
     music-index --tag              # write the analysis into the files' tags
     music-index --root ~/other     # point it at a different library
     music-index --rescan           # ignore the cache, analyse everything again
+    music-index --bands            # a ladder of BPM playlists instead of just one
+    music-index --band Run=130-150 --band Sprint=150-180
+    music-index --playlists-only   # rebuild the playlists from the cache, no analysis
 
 Output, written next to the library root:
     bpm_index.csv          every track: title, artist, album, BPM, key, energy, path
     running_130_160.m3u8   the BPM window as a playlist, slowest track first
+    <band>_<low>_<high>.m3u8   one file per --band / --bands window, same shape
     .bpm_cache.jsonl       append-only cache, so an interrupted scan resumes
 
 What gets measured, and how much to trust it
@@ -89,6 +93,17 @@ REPLAYGAIN_REFERENCE_LUFS = -18.0    # ReplayGain 2.0 reference level
 
 CSV_NAME = "bpm_index.csv"
 CACHE_NAME = ".bpm_cache.jsonl"
+
+# The ladder --bands writes. Bands are half-open, [low, high), so a track at exactly
+# 130 BPM lands in Run and nowhere else. The single --playlist window stays inclusive
+# at both ends, as it always was.
+DEFAULT_BANDS = [
+    ("Chill", 60.0, 90.0),
+    ("Walk", 90.0, 110.0),
+    ("Jog", 110.0, 130.0),
+    ("Run", 130.0, 150.0),
+    ("Sprint", 150.0, 180.0),
+]
 
 PITCH_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 # Krumhansl-Kessler key profiles: how strongly each scale degree belongs to a key.
@@ -583,23 +598,55 @@ def write_csv(records, csv_path, root):
             ])
 
 
-def write_playlist(records, playlist_path, root, low, high, min_confidence):
+def write_playlist(records, playlist_path, root, low, high, min_confidence,
+                   title="Running", include_high=True):
     """Everything inside the BPM window, slowest first, as .m3u8 with relative paths."""
+    def in_window(bpm):
+        return low <= bpm <= high if include_high else low <= bpm < high
+
     picked = [r for r in records
               if r.get("bpm") is not None
-              and low <= r["bpm"] <= high
+              and in_window(r["bpm"])
               and r.get("confidence", 0.0) >= min_confidence]
     picked.sort(key=lambda r: (r["bpm"], r.get("artist") or "", r.get("title") or ""))
 
     with open(playlist_path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write("#EXTM3U\n")
-        handle.write("#PLAYLIST:Running {:g}-{:g} BPM\n".format(low, high))
+        handle.write("#PLAYLIST:{} {:g}-{:g} BPM\n".format(title, low, high))
         for rec in picked:
             handle.write("#EXTINF:{},{} - {} [{:.0f} BPM]\n".format(
                 int(rec.get("duration") or 0), rec.get("artist", ""),
                 rec.get("title", ""), rec["bpm"]))
             handle.write(os.path.relpath(rec["path"], root) + "\n")
     return picked
+
+
+def parse_band(text):
+    """--band Run=130-150, or bare 130-150 with the window as its own name."""
+    name, _, window = text.rpartition("=")
+    match = re.match(r"^\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*$", window)
+    if not match:
+        raise argparse.ArgumentTypeError(
+            "expected NAME=LOW-HIGH (e.g. Run=130-150), got {!r}".format(text))
+    low, high = float(match.group(1)), float(match.group(2))
+    if low >= high:
+        raise argparse.ArgumentTypeError("{}: low must be below high".format(text))
+    return (name.strip() or "BPM", low, high)
+
+
+def band_filename(name, low, high):
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").lower() or "bpm"
+    return "{}_{:g}_{:g}.m3u8".format(slug, low, high)
+
+
+def write_bands(records, bands, root, min_confidence):
+    """One playlist per band. Half-open windows, so a track belongs to exactly one."""
+    for name, low, high in bands:
+        path = os.path.join(root, band_filename(name, low, high))
+        picked = write_playlist(records, path, root, low, high, min_confidence,
+                                title=name, include_high=False)
+        print("Wrote {} ({} tracks, {:g}-{:g} BPM)".format(
+            path, len(picked), low, high))
 
 
 # --------------------------------------------------------------------------- main
@@ -648,8 +695,18 @@ def main():
     parser.add_argument("--retry-failed", action="store_true",
                         help="re-analyse only the tracks that previously failed")
     parser.add_argument("--limit", type=int, default=0, help="stop after N new files")
-    parser.add_argument("--playlist", default="running_130_160.m3u8",
-                        help="playlist filename, empty string to skip")
+    parser.add_argument("--playlist", default=None,
+                        help="single-window playlist filename "
+                             "(default: running_130_160.m3u8, empty string to skip)")
+    parser.add_argument("--band", action="append", type=parse_band, default=[],
+                        metavar="NAME=LOW-HIGH",
+                        help="write a playlist for this BPM window; repeatable")
+    parser.add_argument("--bands", action="store_true",
+                        help="write the default ladder of BPM playlists: " +
+                             ", ".join("{} {:g}-{:g}".format(*b) for b in DEFAULT_BANDS))
+    parser.add_argument("--playlists-only", action="store_true",
+                        help="build the playlists from the cache alone: no library "
+                             "walk, no analysis, no CSV")
     parser.add_argument("--low", type=float, default=130.0, help="playlist lower BPM bound")
     parser.add_argument("--high", type=float, default=160.0, help="playlist upper BPM bound")
     parser.add_argument("--min-confidence", type=float, default=0.85,
@@ -665,6 +722,27 @@ def main():
     root = os.path.abspath(args.root)
     cache_path = os.path.join(root, CACHE_NAME)
     csv_path = os.path.join(root, CSV_NAME)
+
+    bands = list(args.band) + (DEFAULT_BANDS if args.bands else [])
+    # Explicit --playlist always wins; otherwise the old single window is the default
+    # only when no bands were asked for.
+    playlist_name = args.playlist
+    if playlist_name is None:
+        playlist_name = "" if bands else "running_130_160.m3u8"
+
+    if args.playlists_only:
+        # Straight from the cache: the library walk is the slow part on network
+        # storage, and nothing here needs to touch the audio.
+        records = list(load_cache(cache_path).values())
+        print("Loaded {} tracks from {}".format(len(records), cache_path), flush=True)
+        if playlist_name:
+            playlist_path = os.path.join(root, playlist_name)
+            picked = write_playlist(records, playlist_path, root,
+                                    args.low, args.high, args.min_confidence)
+            print("Wrote {} ({} tracks between {:g} and {:g} BPM)".format(
+                playlist_path, len(picked), args.low, args.high))
+        write_bands(records, bands, root, args.min_confidence)
+        return 0
 
     files = find_audio_files(root)
     print("Found {} audio files under {}".format(len(files), root), flush=True)
@@ -713,12 +791,14 @@ def main():
     print("{} tracks measured, {} could not be read".format(
         len(measured), len(records) - len(measured)))
 
-    if args.playlist:
-        playlist_path = os.path.join(root, args.playlist)
+    if playlist_name:
+        playlist_path = os.path.join(root, playlist_name)
         picked = write_playlist(records, playlist_path, root,
                                 args.low, args.high, args.min_confidence)
         print("Wrote {} ({} tracks between {:g} and {:g} BPM)".format(
             playlist_path, len(picked), args.low, args.high))
+
+    write_bands(records, bands, root, args.min_confidence)
 
     if args.tag or args.tag_dry_run:
         written, unchanged, failed = tag_library(
