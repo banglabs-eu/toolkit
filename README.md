@@ -96,6 +96,53 @@ Uses VAAPI (`/dev/dri/renderD128`) when available, falling back to libx264. Need
 
 Full write-up: <https://snippets.eu/post/bang/usb-movies-on-sony-tvs>
 
+### music-index
+
+Measures every track in a music library — tempo, musical key, loudness (LUFS +
+ReplayGain), true peak and an energy rating — and writes the results to a CSV, to
+a playlist built from a BPM window, and optionally into the files' own tags.
+Reads `pCloudDrive/Audio/Music/Artists` by default.
+
+```bash
+music-index                        # analyse whatever is new, refresh index + playlist
+music-index --limit 20             # stop after 20 new files
+music-index --retry-failed         # re-try tracks that previously failed
+music-index --tag-dry-run          # preview what would be written to the files
+music-index --tag                  # write BPM/key/gain into the files' tags
+music-index --low 90 --high 120 --playlist chill.m3u8
+music-index --root ~/other-library # point it at a different library
+```
+
+Output lands next to the library root:
+
+```
+bpm_index.csv          every track: title, artist, album, BPM, key, energy, path
+running_130_160.m3u8   the BPM window as a playlist, slowest track first
+.bpm_cache.jsonl       append-only cache, one record per track
+```
+
+The cache is the point. It is flushed after every track, so an interrupted run —
+a reboot, a Ctrl-C, a pCloud stall — costs only the handful of tracks in flight.
+Re-running skips everything already measured, so adding music next month costs
+the new tracks and nothing else. Just run `music-index` again.
+
+`--rescan` is the one flag that throws that away and re-analyses the whole
+library from scratch; `--retry-failed` is the gentler one, retrying only the
+tracks that errored.
+
+Tempo detection cannot tell a bar from a half-bar, so a track may land on half or
+double its felt tempo — hence the `BPM_Half` and `BPM_Double` columns, and the
+`Confidence` column measuring how well three separate windows of the track
+agreed. Key detection is dependable on tonal pop and rock, much less so on
+ambient or heavily percussive material.
+
+Needs `ffmpeg`. `librosa` and `mutagen` are pip-only, so on first run the tool
+builds its own venv under `~/.local/share/bpm-scan` — nothing to activate.
+
+Keep `--jobs` low (4 is the default) when the library is on a pCloud FUSE mount;
+higher concurrency has repeatedly pushed the mount into unresponsive D-state
+reads.
+
 ### backup
 
 Backs up your system to pCloud via rclone. Excludes build artifacts, caches, secrets, and SSH keys. Skips metered networks automatically.
