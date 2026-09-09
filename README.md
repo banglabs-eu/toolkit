@@ -96,6 +96,91 @@ Uses VAAPI (`/dev/dri/renderD128`) when available, falling back to libx264. Need
 
 Full write-up: <https://snippets.eu/post/bang/usb-movies-on-sony-tvs>
 
+### pslag
+
+Measures input lag on a PS Remote Play session, so "the cloud feels worse than
+local" becomes a number.
+
+```bash
+pslag rig --label local          # flashing marker; film the screen at 240fps
+pslag frame clip.mp4             # dump a frame with a grid, to pick the boxes
+pslag measure clip.mp4 --fps 240 \
+    --marker 300,700,120,120 --game 900,400,160,160 --label local
+pslag net --label cloud          # rtt, jitter, loss and bitrate, live
+pslag runs                       # every run so far, cloud next to local
+```
+
+Timing a game stream needs two moments: when your thumb moved, and when the
+screen reacted. Because the client runs on this laptop the kernel already
+timestamps the button press, so only the second moment needs a camera.
+
+`rig` fills a terminal with black and flashes it white the instant the kernel
+sees a button — it adds about 0.15 ms of its own. Put that terminal beside the
+stream window, run the stream **windowed** so both are in shot, and film the
+screen with a phone at 240fps. `measure` then walks the video, finds every
+flash and the first reaction that followed it, and reports the gap per trial.
+
+The flash and the game frame reach the panel through the same compositor and
+the same screen, so the gap between them is the streaming loop alone:
+controller → console → encode → network → decode. That is the right number for
+comparing two connections. For absolute click-to-photon, add your local
+display pipeline back with `--marker-latency`.
+
+The camera never needs to see your hands. The flash *is* the button press —
+that is the entire point of it — so the video holds both events and the only
+clock involved is the frame number. There is nothing to synchronise.
+
+What that does mean is that **the flashing terminal has to stay in shot**. Zoom
+in on the reaction as tightly as you like, but leave a strip of the terminal at
+the edge of the frame. The box is averaged down to one number, so a sliver of
+it is plenty.
+
+Picking the two boxes matters more than anything else:
+
+- `--marker` sits inside the flashing terminal, away from its edges.
+- `--game` sits on something that visibly changes when you press, and well away
+  from the marker so its light cannot spill in.
+
+Keep the scene still between presses; a trial where the game box was already
+moving is reported as skipped rather than guessed at. Press 15–20 times, 30 if
+you want a tight median.
+
+**What to press.** Reference methods all use a step change — a muzzle flash,
+the first frame of a shooting animation. PS5 menu transitions are eased ramps
+instead, so the detector fires somewhere up the slope and reads late. That bias
+lands the same way on both routes, which makes a menu fine for comparing cloud
+against local and poor for an absolute figure. Never change stimulus between
+two runs you mean to compare.
+
+Best to worst, staying inside the PS5 UI:
+
+1. **On-screen keyboard.** Open Search from the menu bar and press X on a key.
+   The key's press highlight is about as close to a step as the UI gets, it
+   lands in the same spot every time, and it repeats forever. Put `--game` on
+   that one key. This is the one to use.
+2. **PS button → Control Center.** Screen-wide, so the signal dwarfs the noise
+   and the box is trivial to place. It fades in, so it reads late — but
+   consistently late.
+3. **Sliding along the menu bar.** Noisiest of the three. Aim the box at a
+   narrow vertical strip on the boundary between two icons so the highlight
+   sweeps across it — the steepest part of the ramp — rather than at an icon.
+
+Stay off the game cards: they auto-play video previews, which trip the "already
+moving" check and skip most trials. The static icon row — Search, the Settings
+gear — is safe.
+
+`net` is the other half, and needs no camera. It finds the stream peer among
+the open UDP sockets, then logs RTT, jitter, loss, bitrate and wifi signal for
+the whole session, printing a summary at the end. Handy on its own for
+catching the wifi dropouts behind a lag spike. PSN relays often refuse ICMP; it
+says so and keeps the bitrate log going.
+
+Everything lands in `~/pslag/` — a CSV per run, plus a summary each run appends
+to, which is what `pslag runs` prints. Label runs `cloud` and `local` and the
+comparison reads straight off that table.
+
+Needs `ffmpeg` and `python3-numpy`. No root, no GUI toolkit.
+
 ### backup
 
 Backs up your system to pCloud via rclone. Excludes build artifacts, caches, secrets, and SSH keys. Skips metered networks automatically.

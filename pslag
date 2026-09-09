@@ -1,0 +1,874 @@
+#!/usr/bin/env python3
+"""pslag — record and measure input lag on PS Remote Play sessions.
+
+The problem with timing a game stream is that you need to know two moments:
+when your thumb moved, and when the screen reacted. Because the client runs on
+this laptop, the kernel already timestamps the button press to the microsecond,
+so we only have to catch the second moment with a camera.
+
+  pslag rig       Fills a terminal with black and flashes it white the instant
+                  the kernel sees a controller button. Film that terminal and
+                  the game window together at 240fps.
+  pslag frame     Pull one frame out of that video so you can read off the two
+                  regions to watch.
+  pslag measure   Replay the video, find every flash and the reaction that
+                  followed it, and report the gap.
+  pslag net       Log RTT, jitter, loss and bitrate to the stream peer during a
+                  session — the network share of the lag, recorded live.
+  pslag runs      Show every run recorded so far, cloud next to local.
+
+Because the flash and the game frame both travel through the same compositor
+and the same panel, the gap between them is the streaming loop on its own:
+controller -> console -> encode -> network -> decode. Your local display
+pipeline is the one thing left out, so add it back with --marker-latency if you
+want absolute click-to-photon rather than a comparison.
+
+Dependencies: ffmpeg and python3-numpy. No root, no GUI toolkit.
+"""
+
+import argparse
+import csv
+import fcntl
+import glob
+import json
+import os
+import re
+import select
+import signal
+import statistics
+import struct
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime
+
+DATA_DIR = os.path.expanduser("~/pslag")
+MEASURE_SUMMARY = os.path.join(DATA_DIR, "measure-summary.csv")
+NET_SUMMARY = os.path.join(DATA_DIR, "net-summary.csv")
+
+# --- input_event, straight from linux/input.h -------------------------------
+EV_KEY = 0x01
+EVENT_FMT = "llHHi"
+EVENT_SIZE = struct.calcsize(EVENT_FMT)
+EVIOCSCLOCKID = 0x400445A0  # _IOW('E', 0xa0, int)
+BTN_SOUTH = 0x130           # cross on a DualSense
+
+# Remote Play / stream ports worth noticing when hunting for the peer.
+STREAM_PORTS = {9295, 9296, 9297, 9302, 47998, 47999, 48000, 48010}
+
+BOLD, DIM, GREEN, YELLOW, RED, RESET = (
+    "\033[1m", "\033[2m", "\033[0;32m", "\033[0;33m", "\033[0;31m", "\033[0m")
+
+
+def die(msg):
+    print(f"{RED}error:{RESET} {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def note(msg):
+    print(f"{DIM}{msg}{RESET}")
+
+
+def ensure_data_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def stamp():
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def append_summary(path, row, header):
+    ensure_data_dir()
+    new = not os.path.exists(path)
+    with open(path, "a", newline="") as fh:
+        w = csv.writer(fh)
+        if new:
+            w.writerow(header)
+        w.writerow(row)
+
+
+def pct(values, p):
+    """Percentile without pulling in scipy."""
+    if not values:
+        return float("nan")
+    s = sorted(values)
+    if len(s) == 1:
+        return s[0]
+    k = (len(s) - 1) * p / 100.0
+    lo = int(k)
+    hi = min(lo + 1, len(s) - 1)
+    return s[lo] + (s[hi] - s[lo]) * (k - lo)
+
+
+# --- finding the controller -------------------------------------------------
+
+def device_name(event_path):
+    base = os.path.basename(event_path)
+    try:
+        with open(f"/sys/class/input/{base}/device/name") as fh:
+            return fh.read().strip()
+    except OSError:
+        return "?"
+
+
+def has_key(event_path, code):
+    """True if the device advertises a given key code (gamepad test)."""
+    base = os.path.basename(event_path)
+    try:
+        with open(f"/sys/class/input/{base}/device/capabilities/key") as fh:
+            words = fh.read().split()
+    except OSError:
+        return False
+    # Words are 64-bit hex, most significant first; the last covers bits 0-63.
+    idx = code // 64
+    if idx >= len(words):
+        return False
+    word = int(words[len(words) - 1 - idx], 16)
+    return bool(word >> (code % 64) & 1)
+
+
+def list_pads():
+    """Every readable event device, gamepads first."""
+    found = []
+    for path in sorted(glob.glob("/dev/input/event*"),
+                       key=lambda p: int(re.sub(r"\D", "", p) or 0)):
+        if not os.access(path, os.R_OK):
+            continue
+        found.append((path, device_name(path), has_key(path, BTN_SOUTH)))
+    return found
+
+
+def find_pad(explicit):
+    if explicit:
+        path = explicit if explicit.startswith("/dev") else f"/dev/input/{explicit}"
+        if not os.access(path, os.R_OK):
+            die(f"cannot read {path}. Is the controller connected, and are you "
+                f"in the 'input' group?")
+        return path, device_name(path)
+
+    pads = [p for p in list_pads() if p[2]]
+    if not pads:
+        readable = list_pads()
+        msg = ["no gamepad found among the input devices this user can read."]
+        if readable:
+            msg.append("Readable devices were:")
+            msg += [f"    {p}  {n}" for p, n, _ in readable]
+        msg.append("")
+        msg.append("Connect the controller (USB is the steadiest for timing), "
+                   "then try again.")
+        msg.append("If it is connected but not listed, you may need: "
+                   "sudo usermod -aG input $USER  (then log out and back in)")
+        die("\n".join(msg))
+    if len(pads) > 1:
+        note("several gamepads found; using the first. Override with --device.")
+        for p, n, _ in pads:
+            note(f"    {p}  {n}")
+    return pads[0][0], pads[0][1]
+
+
+# --- pslag rig --------------------------------------------------------------
+
+def cmd_rig(args):
+    """Fill this terminal with black, and flash it white on every button press.
+
+    An earlier version drew the marker in a GTK window, but COSMIC would not
+    hand it frame callbacks reliably, so flashes went unpainted. A terminal
+    repaints whenever it is written to, which is the one thing we need.
+    """
+    if not sys.stdout.isatty():
+        die("rig paints the terminal, so run it in a terminal window "
+            "(not through a pipe).")
+
+    path, name = find_pad(args.device)
+    ensure_data_dir()
+    log_path = os.path.join(DATA_DIR, f"rig-{args.label}-{stamp()}.csv")
+
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    clock_is_monotonic = True
+    try:
+        # Ask the kernel to timestamp events on CLOCK_MONOTONIC so they can be
+        # compared with our own clock without conversion.
+        fcntl.ioctl(fd, EVIOCSCLOCKID, struct.pack("i", time.CLOCK_MONOTONIC))
+    except OSError:
+        clock_is_monotonic = False
+
+    btn = "any button" if args.button is None else f"key code {args.button}"
+    print(f"{BOLD}pslag rig{RESET}  —  {name}  ({path})")
+    print(f"  watching  : {btn}")
+    print(f"  flash     : {args.flash} ms, filling this whole terminal")
+    print(f"  clock     : "
+          f"{'kernel monotonic' if clock_is_monotonic else 'realtime, converted'}")
+    print()
+    print("  Make this terminal a decent size and put it beside the stream")
+    print("  window — both have to be in shot, so run the stream windowed")
+    print("  rather than fullscreen. Film the screen at 240fps, then press the")
+    print("  button 15-20 times, leaving the scene still in between so the")
+    print("  reaction is the only thing that moves.")
+    print()
+    print(f"  {DIM}Enter to start, Ctrl-C when you are done.{RESET}")
+    try:
+        input()
+    except (EOFError, KeyboardInterrupt):
+        os.close(fd)
+        return
+
+    WHITE = b"\033[48;2;255;255;255m\033[2J\033[H"
+    BLACK = b"\033[48;2;0;0;0m\033[2J\033[H"
+    ALT_ON = b"\033[?1049h\033[?25l"
+    ALT_OFF = b"\033[?25h\033[?1049l\033[0m"
+
+    log = open(log_path, "w", newline="")
+    writer = csv.writer(log)
+    writer.writerow(["n", "press_mono_s", "painted_mono_s", "software_ms"])
+    log.flush()
+
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    presses, software = 0, []
+    lit_until = None
+    rt_offset = time.clock_gettime(time.CLOCK_REALTIME) - time.monotonic()
+
+    os.write(1, ALT_ON)
+    os.write(1, BLACK)
+    try:
+        while True:
+            if lit_until is None:
+                wait_ms = None
+            else:
+                wait_ms = max(0, int((lit_until - time.monotonic()) * 1000))
+            for _fd, _ev in poller.poll(wait_ms):
+                try:
+                    data = os.read(fd, EVENT_SIZE * 64)
+                except BlockingIOError:
+                    continue
+                except OSError:
+                    raise KeyboardInterrupt
+                for off in range(0, len(data) - EVENT_SIZE + 1, EVENT_SIZE):
+                    sec, usec, etype, code, value = struct.unpack(
+                        EVENT_FMT, data[off:off + EVENT_SIZE])
+                    if etype != EV_KEY or value != 1:
+                        continue
+                    if args.button is not None and code != args.button:
+                        continue
+                    ts = sec + usec / 1e6
+                    if not clock_is_monotonic:
+                        ts -= rt_offset
+                    os.write(1, WHITE)
+                    painted = time.monotonic()
+                    presses += 1
+                    ms = (painted - ts) * 1000.0
+                    software.append(ms)
+                    writer.writerow([presses, f"{ts:.6f}", f"{painted:.6f}",
+                                     f"{ms:.3f}"])
+                    log.flush()
+                    lit_until = painted + args.flash / 1000.0
+            if lit_until is not None and time.monotonic() >= lit_until:
+                os.write(1, BLACK)
+                lit_until = None
+    except KeyboardInterrupt:
+        pass
+    finally:
+        os.write(1, ALT_OFF)
+        os.close(fd)
+        log.close()
+
+    print()
+    if presses:
+        print(f"  {presses} presses logged to {log_path}")
+        # A pad whose timestamps sit on a different clock gives wild figures;
+        # the flashes are still sound, so say so rather than print nonsense.
+        sane = [v for v in software if 0 <= v < 1000]
+        if sane:
+            med = statistics.median(sane)
+            print(f"  {GREEN}pslag's own delay: median {med:.2f} ms{RESET} "
+                  f"{DIM}(kernel event -> escape code written){RESET}")
+            if len(sane) < len(software):
+                print(f"  {DIM}{len(software) - len(sane)} press(es) had "
+                      f"out-of-range timestamps and were left out{RESET}")
+        else:
+            print(f"  {YELLOW}Could not time pslag's own delay — this pad's "
+                  f"event timestamps\n  do not line up with the system clock. "
+                  f"The flashes themselves are\n  fine, so the video is still "
+                  f"good to measure.{RESET}")
+        print()
+        print(f"  {DIM}What the camera then adds on top is your terminal's")
+        print(f"  repaint plus the panel — the same path the game frame takes,")
+        print(f"  which is why it cancels out when comparing two streams.{RESET}")
+        print()
+        print(f"  Next: film the screen, then")
+        print(f"        pslag frame YOURVIDEO.mp4")
+    else:
+        print(f"  {YELLOW}No presses recorded.{RESET}")
+
+
+
+# --- video helpers ----------------------------------------------------------
+
+def probe(video):
+    if not os.path.exists(video):
+        die(f"no such file: {video}")
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_streams",
+         "-show_format", "-of", "json", video],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        die(f"ffprobe could not read {video}:\n{out.stderr.strip()}")
+    data = json.loads(out.stdout)
+    if not data.get("streams"):
+        die(f"{video} has no video stream")
+    st = data["streams"][0]
+    num, den = (st.get("avg_frame_rate") or "0/0").split("/")
+    fps = float(num) / float(den) if float(den or 0) else 0.0
+    if not fps:
+        num, den = (st.get("r_frame_rate") or "0/1").split("/")
+        fps = float(num) / float(den) if float(den or 0) else 0.0
+    return {
+        "width": int(st["width"]),
+        "height": int(st["height"]),
+        "fps": fps,
+        "duration": float(data.get("format", {}).get("duration") or 0.0),
+    }
+
+
+def parse_roi(text, info, what):
+    try:
+        x, y, w, h = (int(v) for v in text.split(","))
+    except ValueError:
+        die(f"--{what} wants X,Y,W,H in pixels (got {text!r})")
+    if w <= 0 or h <= 0:
+        die(f"--{what}: width and height must be positive")
+    if x < 0 or y < 0 or x + w > info["width"] or y + h > info["height"]:
+        die(f"--{what} box {x},{y},{w},{h} falls outside the "
+            f"{info['width']}x{info['height']} frame")
+    return x, y, w, h
+
+
+def cmd_frame(args):
+    info = probe(args.video)
+    out = args.out or os.path.splitext(os.path.basename(args.video))[0] + "-frame.png"
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+           "-ss", str(args.at), "-i", args.video, "-frames:v", "1",
+           "-vf", f"drawgrid=w={args.grid}:h={args.grid}:t=1:c=red@0.6", out]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"ffmpeg failed:\n{r.stderr.strip()}")
+    print(f"{BOLD}{args.video}{RESET}")
+    print(f"  {info['width']}x{info['height']}  {info['fps']:.2f} fps in file  "
+          f"{info['duration']:.1f} s long")
+    if info["fps"] and info["fps"] < 100:
+        print(f"  {YELLOW}The file says {info['fps']:.0f} fps. If it plays back in")
+        print(f"  slow motion the phone already stretched it — pass the capture")
+        print(f"  rate to measure, e.g. --fps 240.{RESET}")
+    print()
+    print(f"  wrote {out}  (red grid every {args.grid} px)")
+    print()
+    print("  Open it, and read off two boxes as X,Y,W,H — X,Y is the top-left")
+    print("  corner, counting from the top-left of the picture:")
+    print("    --marker  the flashing square, kept tight inside its edges")
+    print("    --game    a patch of the game that changes when you press,")
+    print("              well away from the marker so its light cannot spill in")
+
+
+def roi_traces(video, marker, game, ffmpeg_loglevel="error"):
+    """Mean brightness of both boxes, one byte each, per frame."""
+    import numpy as np
+    mx, my, mw, mh = marker
+    gx, gy, gw, gh = game
+    fc = (f"[0:v]crop={mw}:{mh}:{mx}:{my},scale=1:1:flags=area,format=gray[m];"
+          f"[0:v]crop={gw}:{gh}:{gx}:{gy},scale=1:1:flags=area,format=gray[g];"
+          f"[m][g]hstack=inputs=2[o]")
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", ffmpeg_loglevel,
+           "-i", video, "-filter_complex", fc, "-map", "[o]",
+           "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        die(f"ffmpeg failed reading the boxes:\n"
+            f"{proc.stderr.decode(errors='replace').strip()}")
+    raw = np.frombuffer(proc.stdout, dtype=np.uint8)
+    if raw.size < 4:
+        die("ffmpeg returned no frames — check the file and the box coordinates")
+    raw = raw[: (raw.size // 2) * 2].reshape(-1, 2)
+    return raw[:, 0].astype(float), raw[:, 1].astype(float)
+
+
+def rising_edges(M, hi_thr, lo_thr, min_gap):
+    """Schmitt-triggered rising edges, at least min_gap frames apart."""
+    edges = []
+    lit = M[0] > hi_thr
+    for i in range(1, len(M)):
+        if not lit and M[i] > hi_thr:
+            lit = True
+            if not edges or i - edges[-1] >= min_gap:
+                edges.append(i)
+        elif lit and M[i] < lo_thr:
+            lit = False
+    return edges
+
+
+def cmd_measure(args):
+    try:
+        import numpy as np
+    except ImportError:
+        die("python3-numpy is required: sudo apt install python3-numpy")
+
+    info = probe(args.video)
+    fps = args.fps or info["fps"]
+    if not fps:
+        die("could not work out the frame rate; pass --fps")
+    marker = parse_roi(args.marker, info, "marker")
+    game = parse_roi(args.game, info, "game")
+
+    print(f"{BOLD}pslag measure{RESET}  —  {os.path.basename(args.video)}")
+    print(f"  {info['width']}x{info['height']}, treating it as {fps:.0f} fps "
+          f"({1000.0 / fps:.2f} ms per frame)")
+    if args.fps and info["fps"] and abs(args.fps - info["fps"]) > 1:
+        real = info["duration"] * info["fps"] / fps
+        print(f"  {DIM}file is tagged {info['fps']:.0f} fps, so its "
+              f"{info['duration']:.1f} s of footage is {real:.2f} s of real time{RESET}")
+    print("  reading boxes ...", end="", flush=True)
+    M, G = roi_traces(args.video, marker, game)
+    print(f" {len(M)} frames", flush=True)
+
+    lo, hi = np.percentile(M, 5), np.percentile(M, 95)
+    contrast = hi - lo
+    if contrast < args.min_contrast:
+        die(f"the marker box never changes much (range {contrast:.0f} of 255).\n"
+            f"Either it is not the flashing square, or the exposure has crushed "
+            f"it.\nRun `pslag frame` on the video and check the coordinates.")
+    edges = rising_edges(M, lo + 0.6 * contrast, lo + 0.4 * contrast,
+                         max(1, int(args.min_gap * fps)))
+    if not edges:
+        die("found no flashes in the marker box")
+
+    pre_n = max(8, int(0.15 * fps))
+    search_n = max(2, int(args.window * fps))
+    results, misses = [], []
+
+    for n, i in enumerate(edges, 1):
+        if i < pre_n:
+            misses.append((n, i, "too early in the clip to measure"))
+            continue
+        pre = G[i - pre_n:i]
+        base = float(np.median(pre))
+        mad = float(np.median(np.abs(pre - base))) * 1.4826
+        noise = max(mad, 0.8)
+        need = max(args.k * noise, args.min_delta)
+        if float(np.max(np.abs(pre - base))) > need:
+            misses.append((n, i, "game box was already moving before the press"))
+            continue
+        hit, run = None, 0
+        for j in range(i, min(i + search_n, len(G))):
+            if abs(G[j] - base) > need:
+                run += 1
+                if run >= args.consec:
+                    hit = j - args.consec + 1
+                    break
+            else:
+                run = 0
+        if hit is None:
+            misses.append((n, i, f"no reaction within {args.window:.1f} s"))
+            continue
+        frames = hit - i
+        results.append((n, i, hit, frames, frames * 1000.0 / fps))
+
+    if not results:
+        print()
+        for n, i, why in misses:
+            print(f"  press {n:3d} at frame {i:6d} — {why}")
+        die("no trial produced a measurement. Aim the game box at something "
+            "that visibly changes on the press, and keep the scene still "
+            "between presses.")
+
+    lat = [r[4] for r in results]
+    print()
+    print(f"  {'trial':>5}  {'press':>7}  {'react':>7}  {'frames':>6}  {'ms':>7}")
+    for n, i, j, f, ms in results:
+        print(f"  {n:>5}  {i:>7}  {j:>7}  {f:>6}  {ms:>7.1f}")
+    if misses:
+        print()
+        for n, i, why in misses:
+            print(f"  {DIM}press {n:3d} at frame {i:6d} — skipped, {why}{RESET}")
+
+    med = statistics.median(lat)
+    res_ms = 1000.0 / fps
+    print()
+    print(f"{BOLD}  streaming loop latency — {args.label}{RESET}")
+    print(f"    trials     {len(lat)} measured, {len(misses)} skipped")
+    print(f"    median     {GREEN}{med:.1f} ms{RESET}")
+    print(f"    mean       {statistics.mean(lat):.1f} ms")
+    if len(lat) > 1:
+        print(f"    spread     {min(lat):.1f} – {max(lat):.1f} ms  "
+              f"(sd {statistics.stdev(lat):.1f}, p95 {pct(lat, 95):.1f})")
+    print(f"    resolution ±{res_ms:.1f} ms, one frame of the recording")
+    print()
+    corrected = None
+    if args.marker_latency:
+        corrected = med + args.marker_latency
+        print(f"    {BOLD}click-to-photon {corrected:.1f} ms{RESET}  "
+              f"(+{args.marker_latency:.1f} ms of local display pipeline)")
+    else:
+        print(f"    {DIM}This excludes the laptop's own render+panel delay, which")
+        print(f"    cancels out when comparing two streams. `pslag rig` prints it;")
+        print(f"    pass it back as --marker-latency for true click-to-photon.{RESET}")
+
+    ensure_data_dir()
+    run_csv = os.path.join(DATA_DIR, f"measure-{args.label}-{stamp()}.csv")
+    with open(run_csv, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["trial", "press_frame", "react_frame", "frames", "latency_ms"])
+        for row in results:
+            w.writerow(row)
+    append_summary(
+        MEASURE_SUMMARY,
+        [datetime.now().isoformat(timespec="seconds"), args.label, len(lat),
+         f"{med:.1f}", f"{statistics.mean(lat):.1f}", f"{min(lat):.1f}",
+         f"{max(lat):.1f}", f"{pct(lat, 95):.1f}",
+         f"{corrected:.1f}" if corrected else "",
+         f"{fps:.0f}", os.path.basename(args.video)],
+        ["when", "label", "trials", "median_ms", "mean_ms", "min_ms", "max_ms",
+         "p95_ms", "click_to_photon_ms", "fps", "video"])
+    print()
+    print(f"  per-trial figures  {run_csv}")
+    print(f"  added to           {MEASURE_SUMMARY}   (see: pslag runs)")
+
+    if args.dump:
+        with open(args.dump, "w", newline="") as fh:
+            w = csv.writer(fh)
+            w.writerow(["frame", "marker", "game"])
+            for idx in range(len(M)):
+                w.writerow([idx, f"{M[idx]:.1f}", f"{G[idx]:.1f}"])
+        print(f"  raw traces         {args.dump}")
+
+
+# --- pslag net --------------------------------------------------------------
+
+ADDR_RE = re.compile(r"(?:\[)?([0-9a-fA-F:.]+)(?:\])?:(\d+)$")
+
+
+def stream_peers(app_re):
+    """Connected UDP peers, most stream-looking first."""
+    try:
+        out = subprocess.run(["ss", "-unpH"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    peers = []
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) < 5:
+            continue
+        m = ADDR_RE.match(fields[4])
+        if not m:
+            continue
+        host, port = m.group(1), int(m.group(2))
+        if host in ("0.0.0.0", "*", "::", "127.0.0.1"):
+            continue
+        proc = fields[5] if len(fields) > 5 else ""
+        pname = ""
+        pm = re.search(r'"([^"]+)"', proc)
+        if pm:
+            pname = pm.group(1)
+        score = 0
+        if port in STREAM_PORTS:
+            score += 2
+        if pname and app_re.search(pname):
+            score += 3
+        peers.append((score, host, port, pname or "?"))
+    peers.sort(reverse=True)
+    return peers
+
+
+def iface_for(host):
+    try:
+        out = subprocess.run(["ip", "route", "get", host], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"\bdev\s+(\S+)", out)
+    return m.group(1) if m else None
+
+
+def iface_bytes(iface):
+    try:
+        with open("/proc/net/dev") as fh:
+            for line in fh:
+                if line.split(":")[0].strip() == iface:
+                    parts = line.split(":", 1)[1].split()
+                    return int(parts[0]), int(parts[8])
+    except (OSError, IndexError, ValueError):
+        pass
+    return None, None
+
+
+def wifi_signal(iface):
+    try:
+        with open("/proc/net/wireless") as fh:
+            for line in fh:
+                if line.split(":")[0].strip() == iface:
+                    parts = line.split(":", 1)[1].split()
+                    return float(parts[1].rstrip(".")), float(parts[2].rstrip("."))
+    except (OSError, IndexError, ValueError):
+        pass
+    return None, None
+
+
+PING_RE = re.compile(r"\[(\d+\.\d+)\].*icmp_seq=(\d+).*time=([\d.]+)\s*ms")
+
+
+def cmd_net(args):
+    app_re = re.compile(args.app, re.I)
+    if args.peer:
+        host, port, pname = args.peer, 0, "given"
+    else:
+        peers = stream_peers(app_re)
+        live = [p for p in peers if p[0] > 0]
+        if not live:
+            msg = ["could not spot a stream peer. Start the session first, then "
+                   "run this while the game is on screen."]
+            if peers:
+                msg.append("Other UDP peers open right now:")
+                msg += [f"    {h}:{p}  {n}" for _, h, p, n in peers[:8]]
+                msg.append("Pick one with --peer HOST if you recognise it.")
+            die("\n".join(msg))
+        _, host, port, pname = live[0]
+
+    iface = iface_for(host)
+    print(f"{BOLD}pslag net{RESET}  —  {args.label}")
+    print(f"  peer      : {host}" + (f":{port}" if port else "")
+          + (f"  ({pname})" if pname != "?" else ""))
+    print(f"  interface : {iface or 'unknown'}")
+    print(f"  logging   : {args.interval:.1f} s ping interval, Ctrl-C to stop")
+    print()
+
+    ensure_data_dir()
+    run_csv = os.path.join(DATA_DIR, f"net-{args.label}-{stamp()}.csv")
+    fh = open(run_csv, "w", newline="")
+    writer = csv.writer(fh)
+    writer.writerow(["unix_time", "icmp_seq", "rtt_ms", "down_kbps", "up_kbps",
+                     "wifi_quality", "wifi_dbm"])
+
+    rtts, samples = [], []
+    lock = threading.Lock()
+    ping = subprocess.Popen(
+        ["ping", "-D", "-O", "-i", str(args.interval), host],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    def pump():
+        for line in ping.stdout:
+            m = PING_RE.search(line)
+            if m:
+                with lock:
+                    samples.append((float(m.group(1)), int(m.group(2)),
+                                    float(m.group(3))))
+                    rtts.append(float(m.group(3)))
+            elif "no answer yet" in line:
+                m2 = re.search(r"icmp_seq=(\d+)", line)
+                if m2:
+                    with lock:
+                        samples.append((time.time(), int(m2.group(1)), None))
+
+    threading.Thread(target=pump, daemon=True).start()
+
+    started = time.time()
+    prev_rx, prev_tx = iface_bytes(iface) if iface else (None, None)
+    prev_t = time.time()
+    written = 0
+    down_hist, up_hist = [], []
+    try:
+        while True:
+            time.sleep(1.0)
+            now = time.time()
+            down = up = None
+            if iface:
+                rx, tx = iface_bytes(iface)
+                if rx is not None and prev_rx is not None:
+                    dt = max(now - prev_t, 1e-6)
+                    down = (rx - prev_rx) * 8 / 1000.0 / dt
+                    up = (tx - prev_tx) * 8 / 1000.0 / dt
+                    down_hist.append(down)
+                    up_hist.append(up)
+                prev_rx, prev_tx, prev_t = rx, tx, now
+            q, dbm = wifi_signal(iface) if iface else (None, None)
+            with lock:
+                new = samples[written:]
+                written = len(samples)
+                recent = [s[2] for s in new if s[2] is not None]
+                lost = sum(1 for s in new if s[2] is None)
+            for ts, seq, rtt in new:
+                writer.writerow([f"{ts:.3f}", seq,
+                                 f"{rtt:.2f}" if rtt is not None else "",
+                                 f"{down:.0f}" if down is not None else "",
+                                 f"{up:.0f}" if up is not None else "",
+                                 q if q is not None else "",
+                                 dbm if dbm is not None else ""])
+            fh.flush()
+            elapsed = int(now - started)
+            with lock:
+                allr = list(rtts)
+            bits = [f"{elapsed // 60:02d}:{elapsed % 60:02d}"]
+            if recent:
+                bits.append(f"rtt {statistics.median(recent):5.1f} ms")
+            else:
+                bits.append("rtt    -- ms")
+            if allr:
+                bits.append(f"med {statistics.median(allr):5.1f}  "
+                            f"p95 {pct(allr, 95):5.1f}")
+            if down is not None:
+                bits.append(f"down {down / 1000:5.1f} Mb/s")
+            if lost:
+                bits.append(f"{RED}lost {lost}{RESET}")
+            if dbm is not None:
+                bits.append(f"wifi {dbm:.0f} dBm")
+            print("\r  " + "   ".join(bits) + "      ", end="", flush=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        ping.send_signal(signal.SIGINT)
+        try:
+            tail = ping.communicate(timeout=5)[0] or ""
+        except subprocess.TimeoutExpired:
+            ping.kill()
+            tail = ""
+        fh.close()
+
+    print()
+    print()
+    loss = None
+    m = re.search(r"(\d+) packets transmitted, (\d+) received.*?([\d.]+)% packet loss",
+                  tail, re.S)
+    if m:
+        loss = float(m.group(3))
+    with lock:
+        allr = list(rtts)
+    if not allr:
+        print(f"  {YELLOW}The peer never answered a ping.{RESET}")
+        print(f"  {DIM}Relays on the PSN path often drop ICMP. The bitrate and")
+        print(f"  wifi columns in the log are still good; for the cloud route")
+        print(f"  lean on `pslag measure` for the number that matters.{RESET}")
+    else:
+        jitter = statistics.mean(
+            abs(b - a) for a, b in zip(allr, allr[1:])) if len(allr) > 1 else 0.0
+        print(f"{BOLD}  network — {args.label}{RESET}")
+        print(f"    samples    {len(allr)} replies over "
+              f"{int(time.time() - started)} s")
+        print(f"    rtt        median {GREEN}{statistics.median(allr):.1f} ms{RESET}"
+              f"   p95 {pct(allr, 95):.1f}   max {max(allr):.1f}")
+        print(f"    jitter     {jitter:.1f} ms mean frame-to-frame change")
+        if loss is not None:
+            print(f"    loss       {loss:.1f}%")
+        if down_hist:
+            print(f"    bitrate    down {statistics.median(down_hist) / 1000:.1f} "
+                  f"Mb/s median, up {statistics.median(up_hist) / 1000:.1f} Mb/s")
+        append_summary(
+            NET_SUMMARY,
+            [datetime.now().isoformat(timespec="seconds"), args.label, host,
+             len(allr), f"{statistics.median(allr):.1f}", f"{pct(allr, 95):.1f}",
+             f"{max(allr):.1f}", f"{jitter:.1f}",
+             f"{loss:.1f}" if loss is not None else "",
+             f"{statistics.median(down_hist) / 1000:.1f}" if down_hist else ""],
+            ["when", "label", "peer", "replies", "median_rtt_ms", "p95_rtt_ms",
+             "max_rtt_ms", "jitter_ms", "loss_pct", "down_mbps"])
+    print()
+    print(f"  per-sample log  {run_csv}")
+
+
+# --- pslag runs -------------------------------------------------------------
+
+def show_table(path, title):
+    if not os.path.exists(path):
+        return False
+    with open(path) as fh:
+        rows = list(csv.reader(fh))
+    if len(rows) < 2:
+        return False
+    print(f"{BOLD}{title}{RESET}")
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    for n, row in enumerate(rows):
+        line = "  ".join(c.ljust(w) for c, w in zip(row, widths))
+        print(f"  {DIM}{line}{RESET}" if n == 0 else f"  {line}")
+    print()
+    return True
+
+
+def cmd_runs(_args):
+    any_shown = show_table(MEASURE_SUMMARY, "Measured lag (camera trials)")
+    any_shown |= show_table(NET_SUMMARY, "Network (live session logs)")
+    if not any_shown:
+        print("Nothing recorded yet. Start with:  pslag rig --label local")
+        return
+    print(f"{DIM}Runs sharing a label are the same setup; compare medians "
+          f"across labels.{RESET}")
+
+
+# --- main -------------------------------------------------------------------
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="pslag", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("rig", help="flash this terminal on every button press")
+    r.add_argument("--label", default="run", help="name this setup, e.g. cloud or local")
+    r.add_argument("--device", help="event device, e.g. event20 (default: autodetect)")
+    r.add_argument("--button", type=int,
+                   help="only this key code (default: any button)")
+    r.add_argument("--flash", type=int, default=120, help="flash length in ms (120)")
+    r.set_defaults(func=cmd_rig)
+
+    f = sub.add_parser("frame", help="export one frame so you can pick the boxes")
+    f.add_argument("video")
+    f.add_argument("--at", type=float, default=2.0, help="seconds into the clip (2)")
+    f.add_argument("--grid", type=int, default=100, help="grid spacing in px (100)")
+    f.add_argument("--out", help="output PNG")
+    f.set_defaults(func=cmd_frame)
+
+    m = sub.add_parser("measure", help="find press-to-reaction gaps in the video")
+    m.add_argument("video")
+    m.add_argument("--marker", required=True, metavar="X,Y,W,H",
+                   help="box around the flashing square")
+    m.add_argument("--game", required=True, metavar="X,Y,W,H",
+                   help="box on the part of the game that reacts")
+    m.add_argument("--label", default="run", help="name this setup, e.g. cloud or local")
+    m.add_argument("--fps", type=float,
+                   help="capture rate; pass 240 if the file plays back slowed")
+    m.add_argument("--marker-latency", type=float, metavar="MS",
+                   help="local display delay in ms, to get absolute click-to-photon")
+    m.add_argument("--window", type=float, default=0.6,
+                   help="how long after a press to look for a reaction (0.6 s)")
+    m.add_argument("--min-gap", type=float, default=0.4,
+                   help="ignore flashes closer together than this (0.4 s)")
+    m.add_argument("--k", type=float, default=5.0,
+                   help="reaction threshold in noise multiples (5)")
+    m.add_argument("--min-delta", type=float, default=3.0,
+                   help="floor on the reaction threshold, 0-255 (3)")
+    m.add_argument("--consec", type=int, default=2,
+                   help="frames that must agree before calling it a reaction (2)")
+    m.add_argument("--min-contrast", type=float, default=25.0,
+                   help="least marker light/dark difference to accept (25)")
+    m.add_argument("--dump", metavar="CSV", help="also save the raw box traces")
+    m.set_defaults(func=cmd_measure)
+
+    n = sub.add_parser("net", help="log rtt, jitter and bitrate during a session")
+    n.add_argument("--label", default="run", help="name this setup, e.g. cloud or local")
+    n.add_argument("--peer", help="host to ping (default: autodetect the stream peer)")
+    n.add_argument("--app", default="chiaki|moonlight|remote|playstation",
+                   help="process name pattern for the client")
+    n.add_argument("--interval", type=float, default=0.2,
+                   help="seconds between pings (0.2, the unprivileged floor)")
+    n.set_defaults(func=cmd_net)
+
+    s = sub.add_parser("runs", help="show everything recorded so far")
+    s.set_defaults(func=cmd_runs)
+
+    args = p.parse_args()
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

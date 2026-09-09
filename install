@@ -17,6 +17,7 @@ dpkg -s ffmpeg     &>/dev/null || PACKAGES+=(ffmpeg)
 dpkg -s tesseract-ocr  &>/dev/null || PACKAGES+=(tesseract-ocr)
 dpkg -s python3-pil    &>/dev/null || PACKAGES+=(python3-pil)
 dpkg -s python3-numpy  &>/dev/null || PACKAGES+=(python3-numpy)
+# pslag: ffmpeg reads the video, numpy does the arithmetic. Both above.
 
 if [[ ${#PACKAGES[@]} -gt 0 ]]; then
     info "Installing missing packages: ${PACKAGES[*]}"
@@ -33,7 +34,11 @@ echo "  cleanusb — linked to $BIN_DIR"
 sudo ln -sf "$SCRIPT_DIR/bravia-ready" "$BIN_DIR/bravia-ready"
 echo "  bravia-ready — linked to $BIN_DIR"
 
+sudo ln -sf "$SCRIPT_DIR/pslag" "$BIN_DIR/pslag"
+echo "  pslag — linked to $BIN_DIR"
+
 echo ""
 info "Done!"
 echo "  Usage: sudo cleanusb"
 echo "         bravia-ready --list"
+echo "         pslag rig --label local"

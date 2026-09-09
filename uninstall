@@ -6,5 +6,6 @@ info() { echo -e "\033[0;32m$*\033[0m"; }
 
 info "Removing CLI symlinks..."
 sudo rm -f /usr/local/bin/cleanusb
+sudo rm -f /usr/local/bin/pslag
 
 info "Done. Everything removed."
