@@ -191,6 +191,14 @@ nowhere else; the single `--playlist` window stays inclusive at both ends. Askin
 for bands drops the default `running_130_160.m3u8` unless you name a `--playlist`
 as well.
 
+`.playlist_exclude` in the library root keeps tracks out of every playlist without
+touching the index: one pattern per line, a glob if it contains `*` `?` `[`, a plain
+substring otherwise, `#` for comments. `--exclude PATTERN` does the same for one run.
+Excluded tracks stay in the CSV and keep their tags — this is about what you are
+handed to listen to, not about what is known. It exists because a Polish preschool
+compilation swept the top of the run mix: nursery rhymes have metronomic beats, major
+keys and clean production, which is precisely what the score rewards.
+
 `--playlists-only` builds them straight from the cache: no library walk, no
 analysis, no CSV. That is the flag for re-cutting playlists at different tempos,
 and it returns in well under a second.

@@ -74,6 +74,7 @@ Why every file read goes through a subprocess
 
 import argparse
 import csv
+import fnmatch
 import math
 import json
 import os
@@ -111,6 +112,10 @@ REPLAYGAIN_REFERENCE_LUFS = -18.0    # ReplayGain 2.0 reference level
 
 CSV_NAME = "bpm_index.csv"
 CACHE_NAME = ".bpm_cache.jsonl"
+# Tracks the playlists should never offer, however well they measure: one pattern
+# per line, blank lines and # comments ignored. They stay in the index and keep
+# their tags -- this is about what you are handed to listen to, not what is known.
+EXCLUDE_NAME = ".playlist_exclude"
 
 # The ladder --bands writes. Bands are half-open, [low, high), so a track at exactly
 # 130 BPM lands in Run and nowhere else. The single --playlist window stays inclusive
@@ -820,6 +825,20 @@ def score_run(record, cadence):
     return sum(RUN_WEIGHTS[name] * value for name, value in parts.items()), parts
 
 
+def drop_excluded(records, root, extra):
+    """Everything the playlists may draw on, with the exclusions removed."""
+    patterns = load_exclusions(root, extra)
+    if not patterns:
+        return records
+    kept = [r for r in records if not is_excluded(r, root, patterns)]
+    dropped = len(records) - len(kept)
+    if dropped:
+        print("Excluded {} track{} from the playlists ({} pattern{})".format(
+            dropped, "" if dropped == 1 else "s",
+            len(patterns), "" if len(patterns) == 1 else "s"), flush=True)
+    return kept
+
+
 def write_run_mix(records, playlist_path, root, cadence, top, min_confidence):
     """The best-scoring tracks for a run, best first, one entry per song."""
     scored = []
@@ -856,6 +875,40 @@ def write_run_mix(records, playlist_path, root, cadence, top, min_confidence):
         print("  nothing scorable yet: the rhythm measures arrive with the next full "
               "run, which re-analyses tracks measured by an older version")
     return picked
+
+
+def load_exclusions(root, extra):
+    """Patterns from .playlist_exclude in the library root, plus any --exclude."""
+    patterns = list(extra or [])
+    path = os.path.join(root, EXCLUDE_NAME)
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    patterns.append(line)
+    return patterns
+
+
+def is_excluded(record, root, patterns):
+    """
+    True when a track's path matches an exclusion.
+
+    A pattern with glob characters is matched as a glob against the path relative
+    to the library root; one without is matched as a plain substring, so
+    "Przedszkolaka Hity" works without anyone having to remember to write stars.
+    """
+    if not patterns:
+        return False
+    relative = os.path.relpath(record["path"], root).lower()
+    for pattern in patterns:
+        pattern = pattern.lower()
+        if any(ch in pattern for ch in "*?["):
+            if fnmatch.fnmatch(relative, pattern):
+                return True
+        elif pattern in relative:
+            return True
+    return False
 
 
 def parse_band(text):
@@ -949,6 +1002,9 @@ def main():
                         help="target steps per minute for --run-mix (default: 170)")
     parser.add_argument("--top", type=int, default=60,
                         help="how many tracks --run-mix keeps (default: 60)")
+    parser.add_argument("--exclude", action="append", default=[], metavar="PATTERN",
+                        help="keep matching tracks out of every playlist; repeatable, "
+                             "and read from {} in the library root".format(EXCLUDE_NAME))
     parser.add_argument("--playlists-only", action="store_true",
                         help="build the playlists from the cache alone: no library "
                              "walk, no analysis, no CSV")
@@ -980,6 +1036,7 @@ def main():
         # storage, and nothing here needs to touch the audio.
         records = list(load_cache(cache_path).values())
         print("Loaded {} tracks from {}".format(len(records), cache_path), flush=True)
+        records = drop_excluded(records, root, args.exclude)
         if playlist_name:
             playlist_path = os.path.join(root, playlist_name)
             picked = write_playlist(records, playlist_path, root,
@@ -1051,6 +1108,8 @@ def main():
     print("\nWrote {}".format(csv_path))
     print("{} tracks measured, {} could not be read".format(
         len(measured), len(records) - len(measured)))
+
+    records = drop_excluded(records, root, args.exclude)
 
     if playlist_name:
         playlist_path = os.path.join(root, playlist_name)
