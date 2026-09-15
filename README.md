@@ -685,7 +685,7 @@ quietly showing you a stale local file. `focus --logout` goes back to the CSV,
 flushing anything still waiting on the way out.
 
 Everything here is still standard library — `urllib`, not `requests`. The
-service on the other end is [`toolkit-api`](../toolkit-api); the account is
+service on the other end is [`backend.toolkit`](../backend.toolkit); the account is
 `accounts.bang-labs.eu`. `FOCUS_API_URL` and `FOCUS_ACCOUNTS_URL` point either
 somewhere else for local work.
 
