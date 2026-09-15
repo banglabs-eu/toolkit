@@ -2383,6 +2383,15 @@ def spell(minutes):
     return "%d h" % hours if not rest else "%d h %d min" % (hours, rest)
 
 
+def stamp(moment, day, width=5):
+    """23:50-00:15 is one block, not a span running backwards, so an end that
+    falls on the next day says so."""
+    clock = moment.strftime("%H:%M")
+    if moment.date() == day or clock == "00:00":   # midnight belongs to both
+        return "%-*s" % (width, clock)
+    return "%-*s" % (width, clock + "+1")
+
+
 def parse_when(text):
     """A day, written as it comes to mind.
 
@@ -2470,9 +2479,12 @@ def show_day(rows, day, colour, cols):
         return 0.0
 
     focused = sum(block[2] for block in blocks)
+    # Wider columns only on a day that needs them: most days end before midnight.
+    width = 7 if any(block[1].date() != day for block in blocks) else 5
+    last = max(block[1] for block in blocks)
     summary = ("%d block%s · %s focused · %s to %s"
                % (len(blocks), "" if len(blocks) == 1 else "s", spell(focused),
-                  blocks[0][0].strftime("%H:%M"), blocks[-1][1].strftime("%H:%M")))
+                  blocks[0][0].strftime("%H:%M"), stamp(last, day).strip()))
     heading = paint(title, BOLD + ACCENT, colour)
     if len(title) + len(summary) + 3 <= cols:
         print("%s — %s" % (heading, summary))
@@ -2487,20 +2499,20 @@ def show_day(rows, day, colour, cols):
             gap = (started - blocks[index - 1][1]).total_seconds() / 60.0
             if gap >= 5:
                 print(paint("    ⋯  %s away" % spell(gap), DIM, colour))
-        if len(goal) > room:
+        if len(goal) > room - (width - 5):
             goal = goal[: room - 1] + "…"
         # Pad before colouring: the escape codes would count towards a width.
         state = paint("%-7s" % ("done" if completed else "stopped"),
                       GREEN if completed else AMBER, colour)
         print("  %s–%s  %6s min  %s  %s"
-              % (started.strftime("%H:%M"), ended.strftime("%H:%M"),
+              % (started.strftime("%H:%M"), stamp(ended, day, width),
                  "%.1f" % minutes, state, goal))
 
     print()
     start, end, cells = strip(blocks, max(12, min(cols - 16, 60)))
     print("  %s %s %s" % (paint(start.strftime("%H:%M"), DIM, colour),
                           paint(cells, ACCENT, colour),
-                          paint(end.strftime("%H:%M"), DIM, colour)))
+                          paint(stamp(end, day).strip(), DIM, colour)))
     return focused
 
 

@@ -622,7 +622,8 @@ Tuesday 15 September — 4 blocks · 1 h 48 min focused · 09:15 to 14:30
 ```
 
 Filled cells are blocks you saw through, shaded ones are blocks you stopped,
-dots are the time between. The day is named however it comes to mind: `today`
+dots are the time between. A block belongs to the day it started on, so one
+that runs past midnight stays there and marks its end `00:15+1`. The day is named however it comes to mind: `today`
 (the default), `yesterday`, a weekday name for the most recent one, a bare
 number for that day of this month, a date written day first — `14-9`,
 `14/09/2026` — or ISO. `week` prints the last seven days at once, skipping the
