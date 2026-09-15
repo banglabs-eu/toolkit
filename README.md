@@ -421,10 +421,30 @@ second. `-t` picks one instead, and `$FOCUS_THEME` changes what the default is �
 set it to `plain` for a bare clock, or to a theme name to stop the lottery.
 Random never draws `plain`. A frame costs between 0.2% and 0.9% of one core.
 
-Two themes keep to their seasons. Random offers `haunted` only during the
-Monday-to-Sunday week that holds 31 October, and `christmas` only through
-December; in season, each comes up about a quarter of the time. `-t haunted`
-and `-t christmas` run them any day of the year.
+Four themes keep to their dates. Random offers `haunted` only during the
+Monday-to-Sunday week that holds 31 October, `christmas` through December, and
+`easter` from Palm Sunday to Easter Monday — Easter moves, so `focus` computes
+it. In season each comes up about a quarter of the time. `birthday` outranks
+the rota entirely: on the day itself, random draws nothing else. `-t` names any
+of them any day of the year.
+
+#### Who you are
+
+The first time you run it, `focus` asks for your name and your birthday. Both
+are optional, both are kept in `~/focus/profile.json`, and `focus --me` changes
+them later. They are used for one thing: the `birthday` theme, which puts your
+name up in rainbow letters over a cake once a year.
+
+```
+focus --me
+  Your name: Adam
+  Your birthday (day-month, e.g. 7-3): 7-3-1985
+  Noted: 7 March 1985.
+```
+
+Dates are read day first — `7-3` is the 7th of March — and an ISO date
+(`1985-03-07`) is understood too. Skip either question with enter and nothing
+is stored; the `birthday` theme then simply never comes up on its own.
 
 ```
   *  *      .              *  .
@@ -481,6 +501,8 @@ and `-t christmas` run them any day of the year.
 | `matrix` | glyph rain down every column, bright at the head, fading behind |
 | `neurons` | cells wired into a net, pulses running the dendrites and firing the cell at the far end |
 | `haunted` | a house on the hill, candles guttering behind its windows, bats crossing the moon, a ghost off the roof, lightning, fog in the yard — **Halloween week only** |
+| `easter` | a meadow under a rainbow, flowers nodding, butterflies, and bunnies hopping through — each one may leave a painted egg on the grass, and they stay for the rest of the block — **Easter week only** |
+| `birthday` | bunting, balloons rising on their strings, confetti and a cake with guttering candles, your name in rainbow letters across the top — **your birthday only** |
 | `christmas` | snow falling over a lit tree, a cabin with its fire going and smoke off the chimney, a snowman in the yard, and Santa's sleigh crossing every minute or two — **December only** |
 | `random` | one of the eight scenes, drawn fresh for each block — the default |
 

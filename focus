@@ -13,6 +13,7 @@ whether you saw it through — is appended to a log you can read back.
     focus --preview airport        watch a theme without starting a block
     focus --log                    the sessions so far, today's total on top
     focus --no-finale "quiet"      land the block without the celebration
+    focus --me                     set the name and birthday it greets you by
 
 Themes draw a scene behind the clock, a frame every tenth of a second. Each
 block takes a random one unless -t or $FOCUS_THEME says otherwise:
@@ -39,10 +40,17 @@ block takes a random one unless -t or $FOCUS_THEME says otherwise:
                bats, a ghost off the roof, lightning
     christmas  snow over a lit tree and a cabin with its fire going, a snowman
                in the yard, and a sleigh crossing every minute or two
+    easter     a meadow under a rainbow, bunnies hopping through and leaving
+               painted eggs on the grass behind them
+    birthday   bunting, balloons, confetti and a cake with candles, with your
+               name across the top
 
-The last two keep to their seasons: random offers the haunted house only in
-the Monday-to-Sunday week that holds 31 October, and Christmas only through
-December. -t names either of them any day of the year.
+The last four keep to their dates. Random offers the haunted house only in the
+Monday-to-Sunday week that holds 31 October, Christmas through December, and
+Easter from Palm Sunday to Easter Monday — Easter moves, so it is computed.
+Your birthday outranks the lot: on the day, random draws nothing else. focus
+asks for your name and birthday once, keeps them in ~/focus/profile.json, and
+--me changes them. -t names any of these any day of the year.
 
 `-t plain` is the way back to a bare clock; random never picks it.
 
@@ -58,6 +66,7 @@ is needed; notify-send and paplay are used for the alarm if they exist.
 
 import argparse
 import csv
+import json
 import math
 import os
 import random
@@ -77,6 +86,7 @@ FINALE = 6.0                       # seconds of celebration when a block lands
 FINALES = ("fireworks", "shockwave", "confetti")
 LOG_DIR = os.path.expanduser("~/focus")
 LOG_FILE = os.path.join(LOG_DIR, "sessions.csv")
+PROFILE = os.path.join(LOG_DIR, "profile.json")
 LOG_FIELDS = ["started", "goal", "planned_minutes", "actual_minutes", "completed"]
 
 
@@ -164,6 +174,26 @@ def line(x0, y0, x1, y1):
         if step <= dx:
             err += dx
             y0 += sy
+
+
+def easter_sunday(year):
+    """Easter moves, so it has to be computed: Meeus's Gregorian algorithm.
+
+    The first Sunday after the first full moon on or after the equinox, by the
+    church's own reckoning of both.
+    """
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    moon = (32 + 2 * e + 2 * i - h - k) % 7
+    correction = (a + 11 * h + 22 * moon) // 451
+    month = (h + moon - 7 * correction + 114) // 31
+    day = (h + moon - 7 * correction + 114) % 31 + 1
+    return date(year, month, day)
 
 
 class Canvas:
@@ -1548,6 +1578,248 @@ class Christmas(Theme):
         self._sleigh(canvas, dt, now, cols, rows)
 
 
+
+class Easter(Theme):
+    name = "easter"
+    blurb = "a meadow under a rainbow, bunnies hopping, eggs left behind (Easter)"
+    seasonal = True
+
+    GRASS = rgb(104, 178, 88)
+    TURF = rgb(72, 140, 66)
+    STEM = rgb(92, 160, 80)
+    SUN = rgb(255, 222, 110)
+    CLOUD = rgb(238, 242, 250)
+    WHISKER = rgb(120, 110, 105)
+    PETALS = [rgb(242, 142, 190), rgb(250, 220, 110), rgb(246, 246, 236),
+              rgb(192, 142, 232)]
+    SHELLS = [rgb(242, 122, 142), rgb(250, 206, 92), rgb(122, 202, 232),
+              rgb(172, 222, 132), rgb(212, 152, 236)]
+    FURS = [rgb(238, 235, 228), rgb(186, 146, 112)]
+    ARC = [rgb(236, 92, 88), rgb(244, 152, 70), rgb(248, 214, 96),
+           rgb(126, 200, 106), rgb(96, 168, 236), rgb(126, 124, 218),
+           rgb(178, 128, 226)]
+    WINGS = [[">|<"], ["}|{"]]
+
+    BUNNY = ["  /)_/)", " ( o.o)", " (> <)"]
+    EGG = [" __", "(≈≈)"]
+    SUN_ART = [" \\|/", "-(_)-", " /|\\"]
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.flowers, self.sown, self.arc = [], (0, 0), []
+        self.eggs, self.bunnies, self.moths = [], [], []
+        self.next_bunny = 0.0
+        self.next_moth = 0.0
+        self.started = None
+
+    def _sow(self, cols, rows):
+        if (cols, rows) == self.sown:
+            return
+        self.sown = (cols, rows)
+        self.arc = self._arc(cols, rows)
+        self.flowers = [(x + random.randint(0, 2), random.randrange(4),
+                         random.uniform(0, 6.3), random.randint(1, 2))
+                        for x in range(1, cols - 2, 6) if random.random() < 0.7]
+        self.eggs = [[random.uniform(2, max(3, cols - 6)), random.randrange(5)]
+                     for _ in range(4)]
+
+    def _meadow(self, canvas, now, cols, rows):
+        ground = rows - 1
+        for x in range(cols):
+            canvas.put(x, ground, ",v.w"[(x * 7) % 4], self.TURF if x % 3 else self.GRASS)
+        for x, shade, phase, height in self.flowers:
+            lean = int(round(math.sin(now * 1.3 + phase)))
+            for i in range(height):
+                canvas.put(x, ground - 1 - i, "|", self.STEM)
+            canvas.put(x + lean, ground - 1 - height,
+                       "*" if shade % 2 else "o", self.PETALS[shade])
+        for x, shade in self.eggs:
+            canvas.sprite(x, ground - 2, self.EGG, self.SHELLS[shade % 5])
+
+    def _arc(self, cols, rows):
+        """The rainbow, worked out once per size and kept.
+
+        Each band is a ring of cells at one distance from the centre, rather
+        than a line at one radius: a curve drawn a cell thick has no room for
+        seven colours, and they smear together down the flanks.
+        """
+        if cols < 40 or rows < 12:
+            return []
+        cells = []
+        cx, cy = cols * 0.80, rows * 0.66      # off in the distance, clear of the meadow
+        base = min(rows * 0.42, cols * 0.16)
+        for y in range(rows):
+            for x in range(cols):
+                dy = cy - y
+                if dy < 1.5:
+                    continue
+                band = int(round(base - math.hypot((x - cx) / 2.0, dy)))
+                if 0 <= band < len(self.ARC):
+                    cells.append((x, y, self.ARC[band]))
+        return cells
+
+    def _rainbow(self, canvas):
+        for x, y, tint in self.arc:
+            canvas.put(x, y, "▄", tint)
+
+    def _bunnies(self, canvas, dt, now, cols, rows):
+        ground = rows - 1
+        if now >= self.next_bunny and len(self.bunnies) < 2:
+            heading = random.choice((-1, 1))
+            art = self.BUNNY if heading < 0 else mirror(self.BUNNY)
+            hare = Sprite(art, random.choice(self.FURS),
+                          -8 if heading > 0 else cols + 2, 0,
+                          heading * random.uniform(5.0, 9.0), kind="bunny")
+            hare.born = now
+            self.bunnies.append(hare)
+            self.next_bunny = now + random.uniform(6.0, 18.0)
+        for hare in list(self.bunnies):
+            hare.move(dt)
+            if (hare.vx > 0 and hare.x > cols + 2) or (hare.vx < 0 and hare.x + hare.width < 0):
+                self.bunnies.remove(hare)
+                continue
+            hop = abs(math.sin((now - hare.born) * 4.5)) * 2.0
+            canvas.sprite(hare.x, ground - 2 - len(hare.art) - hop + 1, hare.art, hare.tint)
+            if 0 < hare.x < cols - 5 and len(self.eggs) < 14 and random.random() < 0.012:
+                self.eggs.append([hare.x, random.randrange(5)])   # one left behind
+
+    def _moths(self, canvas, dt, now, cols, rows):
+        if now >= self.next_moth and len(self.moths) < 3:
+            heading = random.choice((-1, 1))
+            self.moths.append(Sprite(self.WINGS[0], random.choice(self.PETALS),
+                                     -3 if heading > 0 else cols + 2,
+                                     random.randint(1, max(1, rows - 4)),
+                                     heading * random.uniform(1.8, 3.6)))
+            self.next_moth = now + random.uniform(4.0, 10.0)
+        for moth in self.moths:
+            moth.art = self.WINGS[int(now * 7) % 2]
+            moth.vy = math.sin(now * 3.0 + moth.x) * 1.7
+        self.advance(canvas, self.moths, dt, cols, rows)
+
+    @staticmethod
+    def in_season(today=None):
+        """Palm Sunday through Easter Monday — nine days around the feast."""
+        today = today or datetime.now().date()
+        sunday = easter_sunday(today.year)
+        return sunday - timedelta(days=7) <= today <= sunday + timedelta(days=1)
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if self.started is None:
+            self.started = now
+            self.next_bunny = now + random.uniform(2.0, 8.0)
+        self._sow(cols, rows)
+        self._rainbow(canvas)
+        if cols > 30:
+            canvas.sprite(2, 0, self.SUN_ART, self.SUN)
+        self._meadow(canvas, now, cols, rows)
+        self._moths(canvas, dt, now, cols, rows)
+        self._bunnies(canvas, dt, now, cols, rows)
+
+
+
+class Birthday(Theme):
+    name = "birthday"
+    blurb = "cake, candles and balloons — on your birthday, once focus knows it"
+    seasonal = True
+
+    BUNTING = [rgb(240, 110, 120), rgb(250, 205, 90), rgb(120, 200, 235),
+               rgb(150, 220, 140), rgb(205, 145, 235)]
+    ICING = rgb(250, 240, 245)
+    SPONGE = rgb(190, 130, 85)
+    PLATE = rgb(200, 205, 215)
+    FLAME = rgb(255, 190, 70)
+    WAX = rgb(240, 245, 250)
+    RIBBON = rgb(240, 110, 120)
+    BOX = rgb(130, 170, 230)
+
+    CAKE = ["  __________ ", " |~~~~~~~~~~|", " |##########|", " \\__________/"]
+    GIFT = ["_|_", "[#]"]
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.balloons, self.bits = [], []
+        self.next_balloon = 0.0
+        self.who = load_profile().get("name", "")
+        self.started = None
+
+    @staticmethod
+    def in_season(today=None):
+        who = load_profile()
+        today = today or datetime.now().date()
+        return who.get("month") == today.month and who.get("day") == today.day
+
+    def _banner(self, canvas, now, cols):
+        for x in range(cols):                          # bunting along the top
+            canvas.put(x, 0, "/\\"[x % 2], self.BUNTING[(x // 2) % 5])
+        greeting = ("HAPPY BIRTHDAY, " + self.who.upper()) if self.who else "HAPPY BIRTHDAY"
+        if len(greeting) > cols - 2:
+            greeting = greeting[: cols - 3] + "…"
+        start = max(0, (cols - len(greeting) - 2) // 2)
+        canvas.put(start, 2, " " * (len(greeting) + 2), "", opaque=True)
+        for i, char in enumerate(greeting):            # each letter its own colour
+            canvas.put(start + 1 + i, 2, char,
+                       BOLD + self.BUNTING[(i + int(now * 3)) % 5])
+
+    def _balloons(self, canvas, dt, now, cols, rows):
+        if now >= self.next_balloon and len(self.balloons) < 7:
+            balloon = Sprite([" __ ", "(  )", " \\/ "], random.choice(self.BUNTING),
+                             random.uniform(1, max(1, cols - 5)), float(rows),
+                             0.0, -random.uniform(1.4, 3.0))
+            balloon.born = now
+            self.balloons.append(balloon)
+            self.next_balloon = now + random.uniform(1.2, 3.5)
+        for balloon in list(self.balloons):
+            balloon.vx = math.sin(now * 1.3 + balloon.born) * 1.8
+            balloon.move(dt)
+            if balloon.y + 3 < 0:
+                self.balloons.remove(balloon)
+                continue
+            canvas.sprite(balloon.x, balloon.y, balloon.art, balloon.tint)
+            for i in range(1, 4):                      # its string, trailing below
+                canvas.put(balloon.x + 2 + (i % 2), balloon.y + 2 + i, "|", DIM + balloon.tint)
+
+    def _confetti(self, canvas, dt, now, cols, rows):
+        while len(self.bits) < cols // 3:
+            self.bits.append([random.uniform(0, cols), random.uniform(-rows, 0),
+                              random.uniform(2.5, 6.0), random.choice(self.BUNTING),
+                              random.uniform(0, 6.3)])
+        for bit in self.bits:
+            bit[1] += bit[2] * dt
+            bit[0] += math.sin(now * 3.0 + bit[4]) * 1.4 * dt
+            if bit[1] > rows - 1:
+                bit[1], bit[0] = -1.0, random.uniform(0, cols)
+            canvas.put(bit[0], bit[1], "*/\\-o"[int(bit[4] * 5) % 5], bit[3])
+
+    def _cake(self, canvas, now, cols, rows):
+        if cols < 26:
+            return
+        x = cols // 2 - 6
+        top = rows - len(self.CAKE)
+        canvas.sprite(x, top, self.CAKE[:2], self.ICING, opaque=True)
+        canvas.sprite(x, top + 2, self.CAKE[2:], self.SPONGE, opaque=True)
+        canvas.put(x, rows - 1, "=" * 13, self.PLATE)
+        for i in range(3):                             # candles, guttering
+            cx = x + 3 + i * 3
+            canvas.put(cx, top - 1, "|", self.WAX)
+            canvas.put(cx, top - 2, "*'."[int(now * 7 + i * 2) % 3], self.FLAME)
+        for gift in (x - 6, x + 14):                   # presents either side
+            if 0 <= gift < cols - 3:
+                canvas.sprite(gift, rows - 2, self.GIFT, self.BOX)
+                canvas.put(gift + 1, rows - 2, "|", self.RIBBON)
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if self.started is None:
+            self.started = now
+        self._confetti(canvas, dt, now, cols, rows)
+        self._balloons(canvas, dt, now, cols, rows)
+        self._banner(canvas, now, cols)                # last, so nothing falls through it
+        self._cake(canvas, now, cols, rows)
+
+
 RANDOM = "random"                  # a different scene every block
 
 
@@ -1560,6 +1832,8 @@ def pick(name):
     """
     if name != RANDOM:
         return name
+    if Birthday.in_season():                   # one day a year, it wins outright
+        return Birthday.name
     pool = []
     for theme_name, theme in THEMES.items():
         if theme_name == Theme.name:
@@ -1707,7 +1981,8 @@ class Desert(Theme):
 
 
 THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galaxy, Jungle, Desert, Farm,
-                                  Matrix, Neurons, Haunted, Christmas)}
+                                  Matrix, Neurons, Haunted, Christmas, Easter,
+                                  Birthday)}
 
 
 def compose(canvas, goal, remaining, total, paused, started_at):
@@ -1921,6 +2196,69 @@ def finished(message, colour, quiet):
     print("%s %s — %s" % (tick, message, datetime.now().strftime("%H:%M")))
 
 
+def load_profile():
+    try:
+        with open(PROFILE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_profile(profile):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(PROFILE, "w") as fh:
+        json.dump(profile, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+
+
+def parse_birthday(text):
+    """Day first, as it is written here: 7-3, 07/03, 7.3.1985, or an ISO date."""
+    for separator in "-/.,":
+        text = text.replace(separator, " ")
+    parts = [part for part in text.split() if part]
+    year = None
+    try:
+        if len(parts) == 3 and len(parts[0]) == 4:
+            year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
+        elif len(parts) == 3:
+            day, month, year = int(parts[0]), int(parts[1]), int(parts[2])
+        elif len(parts) == 2:
+            day, month = int(parts[0]), int(parts[1])
+        else:
+            return None
+        date(year or 2000, month, day)         # a leap year, so 29 February stands
+    except (ValueError, IndexError):
+        return None
+    return month, day, year
+
+
+def ask_profile(force=False):
+    """Ask once for a name and a birthday, so the day itself gets its own scene."""
+    profile = load_profile()
+    if (profile.get("asked") and not force) or not sys.stdin.isatty():
+        return profile
+    print("focus can throw you a party on your birthday. Both answers are")
+    print("optional — press enter to skip, or run focus --me to change them later.")
+    try:
+        name = input("  Your name: ").strip()
+        born = input("  Your birthday (day-month, e.g. 7-3): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return profile
+
+    profile = {"asked": True, "name": name}
+    when = parse_birthday(born) if born else None
+    if born and when is None:
+        print("  Sorry, I could not read that date. Run focus --me to try again.")
+    elif when:
+        profile["month"], profile["day"], profile["year"] = when
+        stamp = date(2000, when[0], when[1]).strftime("%-d %B")
+        print("  Noted: %s%s." % (stamp, " %d" % when[2] if when[2] else ""))
+    save_profile(profile)
+    return profile
+
+
+
 def record(started, goal, planned, actual, completed):
     os.makedirs(LOG_DIR, exist_ok=True)
     new = not os.path.exists(LOG_FILE)
@@ -2075,6 +2413,8 @@ def main():
     parser.add_argument("-p", "--preview", metavar="THEME",
                         choices=sorted(THEMES) + [RANDOM], nargs="?", const=default_theme,
                         help="watch a theme run, logging nothing; q to leave")
+    parser.add_argument("--me", action="store_true",
+                        help="set the name and birthday focus greets you by")
     parser.add_argument("--no-finale", action="store_true",
                         help="end quietly, without the finish animation")
     parser.add_argument("-l", "--log", action="store_true",
@@ -2082,6 +2422,10 @@ def main():
     parser.add_argument("-n", "--limit", type=int, default=15,
                         help="how many sessions --log prints (default: 15)")
     args = parser.parse_args()
+
+    if args.me:
+        ask_profile(force=True)
+        return 0
 
     if args.log:
         return show_log(args.limit)
@@ -2094,6 +2438,8 @@ def main():
     if args.preview:
         return countdown(" ".join(args.goal).strip() or "theme preview",
                          args.minutes, args.preview, preview=True)
+
+    ask_profile()
 
     goal = " ".join(args.goal).strip()
     if not goal:
