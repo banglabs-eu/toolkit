@@ -421,9 +421,28 @@ second. `-t` picks one instead, and `$FOCUS_THEME` changes what the default is �
 set it to `plain` for a bare clock, or to a theme name to stop the lottery.
 Random never draws `plain`. A frame costs between 0.2% and 0.9% of one core.
 
-`haunted` keeps to its season: random only offers it during the Monday-to-Sunday
-week that holds 31 October, and then it comes up about a quarter of the time.
-`-t haunted` runs it any day of the year.
+Two themes keep to their seasons. Random offers `haunted` only during the
+Monday-to-Sunday week that holds 31 October, and `christmas` only through
+December; in season, each comes up about a quarter of the time. `-t haunted`
+and `-t christmas` run them any day of the year.
+
+```
+  *  *      .              *  .
+     ·  .  ·                               ·        ·  .          .
+  ·             .o      \|/   \|/*        · ·              ·
+              . /#\     (o)   (o)                                    · ·
+               (___)~~~~/\~~~~/\>         .                       .
+                     ·
+   ...
+   .                     *  .                            *·
+         ▐▌                                              /\  ·
+     ______                                             /  \          ·
+    /      \                                           o   o\
+   /________\·                                        /     o\    ___
+   | ▓▓     |            *                           /__o__o__\  (o o)
+   |________|            ██████    *                     || .  -(  +  )-████
+████████████████████████████████████████████████████████████████████████████
+```
 
 ```
                                                               .--.     /
@@ -462,6 +481,7 @@ week that holds 31 October, and then it comes up about a quarter of the time.
 | `matrix` | glyph rain down every column, bright at the head, fading behind |
 | `neurons` | cells wired into a net, pulses running the dendrites and firing the cell at the far end |
 | `haunted` | a house on the hill, candles guttering behind its windows, bats crossing the moon, a ghost off the roof, lightning, fog in the yard — **Halloween week only** |
+| `christmas` | snow falling over a lit tree, a cabin with its fire going and smoke off the chimney, a snowman in the yard, and Santa's sleigh crossing every minute or two — **December only** |
 | `random` | one of the eight scenes, drawn fresh for each block — the default |
 
 An afternoon in the tank — the volcano venting, a crab on the floor:

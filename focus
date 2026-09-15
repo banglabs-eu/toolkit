@@ -36,9 +36,13 @@ block takes a random one unless -t or $FOCUS_THEME says otherwise:
     neurons    cells wired into a net, pulses running the dendrites and
                firing the cell at the far end
     haunted    a house on the hill with candles guttering behind its windows,
-               bats, a ghost off the roof, lightning. Random only offers this
-               one during the Monday-to-Sunday week that holds 31 October;
-               -t haunted runs it whenever you like
+               bats, a ghost off the roof, lightning
+    christmas  snow over a lit tree and a cabin with its fire going, a snowman
+               in the yard, and a sleigh crossing every minute or two
+
+The last two keep to their seasons: random offers the haunted house only in
+the Monday-to-Sunday week that holds 31 October, and Christmas only through
+December. -t names either of them any day of the year.
 
 `-t plain` is the way back to a bare clock; random never picks it.
 
@@ -176,7 +180,9 @@ class Canvas:
         self.tints = [[""] * cols for _ in range(rows)]
 
     def put(self, x, y, text, tint="", opaque=False):
-        x, y = int(x), int(y)
+        # floor, not int: a sprite drawn at y and a mark put at y + 1 have to
+        # agree about which row that is, and truncation does not for y < 0.
+        x, y = math.floor(x), math.floor(y)
         if not 0 <= y < self.rows:
             return
         chars, tints = self.chars[y], self.tints[y]
@@ -189,7 +195,7 @@ class Canvas:
 
     def sprite(self, x, y, art, tint="", opaque=False):
         for dy, line in enumerate(art):
-            self.put(x, int(y) + dy, line, tint, opaque)
+            self.put(x, math.floor(y) + dy, line, tint, opaque)
 
     def lines(self):
         out = []
@@ -237,6 +243,11 @@ class Theme:
 
     name = "plain"
     blurb = "just the goal, the clock and the bar"
+    seasonal = False                   # see in_season: some themes keep to a date
+
+    @staticmethod
+    def in_season(today=None):
+        return True
 
     def __init__(self):
         self.last = None
@@ -1228,6 +1239,15 @@ class Galaxy(Theme):
 class Haunted(Theme):
     name = "haunted"
     blurb = "a house on the hill, bats, a ghost and lightning (Halloween week)"
+    seasonal = True
+
+    @staticmethod
+    def in_season(today=None):
+        """The Monday-to-Sunday week that holds the 31st of October."""
+        today = today or datetime.now().date()
+        eve = date(today.year, 10, 31)
+        monday = eve - timedelta(days=eve.weekday())
+        return monday <= today <= monday + timedelta(days=6)
 
     MOON = rgb(238, 236, 214)
     CLOUD = rgb(78, 76, 98)
@@ -1375,28 +1395,179 @@ class Haunted(Theme):
         self._lightning(canvas, now, cols, rows)
 
 
+
+class Christmas(Theme):
+    name = "christmas"
+    blurb = "snow over a cabin and a lit tree, with a sleigh going by (December)"
+    seasonal = True
+
+    SNOW = rgb(242, 247, 255)
+    DRIFT = rgb(206, 219, 238)
+    STAR = rgb(255, 228, 130)
+    NEEDLE = rgb(58, 138, 74)
+    TRUNK = rgb(122, 86, 56)
+    WALL = rgb(126, 88, 60)
+    LIT = rgb(255, 184, 62)
+    SMOKE = rgb(150, 150, 168)
+    SLEIGH = rgb(214, 66, 62)
+    DEER = rgb(156, 114, 72)
+    COAL = rgb(44, 42, 50)
+    CARROT = rgb(240, 142, 60)
+    BAUBLES = [rgb(236, 74, 74), rgb(250, 208, 92), rgb(96, 164, 242),
+               rgb(96, 224, 128), rgb(224, 126, 224)]
+
+    TREE = ["    /\\", "   /  \\", "  /    \\", " /      \\", "/________\\"]
+    LIGHTS = ((4, 1), (2, 2), (6, 2), (1, 3), (4, 3), (7, 3), (3, 4), (6, 4))
+    CABIN = ["   ______", "  /      \\", " /________\\", " |        |", " |________|"]
+    SNOWMAN = ["  ___", " (o o)", "(  +  )"]
+    SLEIGH_ART = ["   o      \\|/   \\|/",
+                  "  /#\\     (o)   (o)",
+                  " (___)~~~~/\\~~~~/\\>"]
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.flakes, self.drifts, self.laid = [], [], 0
+        self.stars = []
+        self.smoke, self.next_puff = [], 0.0
+        self.sleigh, self.next_sleigh = None, 0.0
+        self.yard = None
+        self.started = None
+
+    @staticmethod
+    def in_season(today=None):
+        return (today or datetime.now().date()).month == 12
+
+    def _settle(self, cols, rows):
+        """Snow on the ground, and where the cabin, tree and snowman stand."""
+        if cols == self.laid:
+            return
+        self.laid = cols
+        self.drifts = [1 + (1 if math.sin(x * 0.11) + math.sin(x * 0.27) > 0.7 else 0)
+                       for x in range(cols)]
+        self.flakes = [[random.uniform(0, cols), random.uniform(0, rows),
+                        random.uniform(1.6, 5.0), random.uniform(0, 6.3)]
+                       for _ in range((cols * rows) // 26)]
+        self.stars = [(random.randrange(cols), random.randrange(max(1, rows // 3)),
+                       random.uniform(0, 6.3)) for _ in range(cols // 8)]
+        # Cabin left, tree well right of the clock, snowman at the far end.
+        self.yard = (2, max(16, int(cols * 0.70)), max(30, cols - 12)) if cols >= 44 else None
+
+    def _sky(self, canvas, now, cols, rows):
+        for x, y, phase in self.stars:
+            canvas.put(x, y, "·" if math.sin(now * 1.7 + phase) > 0 else ".", self.DRIFT)
+
+    def _snow(self, canvas, dt, now, cols, rows):
+        for flake in self.flakes:
+            flake[1] += flake[2] * dt
+            flake[0] += math.sin(now * 1.2 + flake[3]) * 1.6 * dt
+            if flake[1] >= rows - self.drifts[min(int(flake[0]) % cols, cols - 1)]:
+                flake[1], flake[0] = 0.0, random.uniform(0, cols)
+            canvas.put(flake[0], flake[1],
+                       "*" if flake[2] > 4.0 else "·" if flake[2] > 2.6 else ".", self.SNOW)
+        for x, deep in enumerate(self.drifts[:cols]):   # what has already landed
+            for y in range(rows - deep, rows):
+                canvas.put(x, y, "█", self.SNOW if y == rows - deep else self.DRIFT)
+
+    def _yard(self, canvas, dt, now, cols, rows):
+        if self.yard is None:
+            return
+        cabin_x, tree_x, man_x = self.yard
+        ground = rows - 2
+
+        top = ground - len(self.CABIN) + 1
+        canvas.sprite(cabin_x, top, self.CABIN[:3], self.SNOW, opaque=True)
+        canvas.sprite(cabin_x, top + 3, self.CABIN[3:], self.WALL, opaque=True)
+        canvas.put(cabin_x + 3, top + 3, "▓▓", self.LIT)
+        canvas.put(cabin_x + 7, top - 1, "▐▌", self.WALL)
+        if now >= self.next_puff:                       # chimney, drawing steadily
+            puff = Sprite(["o"], self.SMOKE, cabin_x + 7, top - 2,
+                          random.uniform(0.3, 1.0), -random.uniform(1.2, 2.2))
+            puff.born = now
+            self.smoke.append(puff)
+            self.next_puff = now + random.uniform(0.6, 1.4)
+        for puff in list(self.smoke):
+            puff.move(dt)
+            age = now - puff.born
+            if puff.y < 0 or age > 9.0:
+                self.smoke.remove(puff)
+                continue
+            canvas.put(puff.x, puff.y, "o" if age < 1.5 else "°" if age < 3.5 else ".",
+                       self.SMOKE)
+
+        tree_top = ground - len(self.TREE)
+        canvas.sprite(tree_x, tree_top, self.TREE, self.NEEDLE, opaque=True)
+        canvas.put(tree_x + 4, tree_top - 1,
+                   "*" if math.sin(now * 3.0) > -0.3 else "+", self.STAR)
+        canvas.put(tree_x + 4, ground, "||", self.TRUNK)
+        for i, (dx, dy) in enumerate(self.LIGHTS):      # the string blinks out of step
+            if math.sin(now * (1.7 + i * 0.3) + i) > -0.2:
+                canvas.put(tree_x + dx, tree_top + dy, "o", self.BAUBLES[i % 5])
+
+        canvas.sprite(man_x, ground - 2, self.SNOWMAN, self.SNOW, opaque=True)
+        canvas.put(man_x + 2, ground - 1, "o o", self.COAL)
+        canvas.put(man_x + 3, ground, "+", self.CARROT)
+        canvas.put(man_x - 1, ground, "-", self.TRUNK)
+        canvas.put(man_x + 7, ground, "-", self.TRUNK)
+
+    def _sleigh(self, canvas, dt, now, cols, rows):
+        if self.sleigh is None:
+            if now < self.next_sleigh:
+                return
+            heading = random.choice((-1, 1))
+            art = self.SLEIGH_ART if heading > 0 else mirror(self.SLEIGH_ART)
+            span = max(len(row) for row in art)
+            self.sleigh = Sprite(art, self.DEER, -span - 2 if heading > 0 else cols + 2,
+                                 random.randint(0, max(0, rows // 3)),
+                                 heading * random.uniform(7.0, 11.0), kind="sleigh")
+        rig = self.sleigh
+        rig.move(dt)
+        rig.vy = math.sin(now * 1.1) * 0.8              # it rides the air
+        if (rig.vx > 0 and rig.x > cols + 2) or (rig.vx < 0 and rig.x + rig.width < 0):
+            self.sleigh = None
+            self.next_sleigh = now + random.uniform(45.0, 110.0)
+            return
+        canvas.sprite(rig.x, rig.y, rig.art, rig.tint)
+        # The reindeer are drawn in one piece; Santa and his sleigh are painted
+        # back over it in red, on whichever end the team is pulling from.
+        box = 1 if rig.vx > 0 else rig.width - 6
+        head = 3 if rig.vx > 0 else rig.width - 4
+        canvas.put(rig.x + box, rig.y + 2, "(___)", self.SLEIGH)
+        canvas.put(rig.x + head, rig.y, "o", self.SLEIGH)
+        canvas.put(rig.x + head - 1, rig.y + 1, "/#\\", self.SLEIGH)
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if self.started is None:
+            self.started = now
+            self.next_sleigh = now + random.uniform(8.0, 30.0)
+        self._settle(cols, rows)
+        self._sky(canvas, now, cols, rows)
+        self._snow(canvas, dt, now, cols, rows)
+        self._yard(canvas, dt, now, cols, rows)
+        self._sleigh(canvas, dt, now, cols, rows)
+
+
 RANDOM = "random"                  # a different scene every block
-
-
-def halloween_week(today=None):
-    """The Monday-to-Sunday week that holds the 31st of October."""
-    today = today or datetime.now().date()
-    eve = date(today.year, 10, 31)
-    monday = eve - timedelta(days=eve.weekday())
-    return monday <= today <= monday + timedelta(days=6)
 
 
 def pick(name):
     """Resolve a theme name, drawing a scene at random when asked to.
 
-    The haunted house keeps to its week. Ask for it by name any time you like,
-    but it only turns up unbidden while Halloween is in the same week.
+    Seasonal themes keep to their dates: ask for one by name any day of the
+    year, but random only offers it in season, where it is weighted to turn up
+    rather than hide among the other ten.
     """
     if name != RANDOM:
         return name
-    pool = [n for n in THEMES if n not in (Theme.name, Haunted.name)]
-    if halloween_week():
-        pool += [Haunted.name] * 3
+    pool = []
+    for theme_name, theme in THEMES.items():
+        if theme_name == Theme.name:
+            continue
+        if not theme.seasonal:
+            pool.append(theme_name)
+        elif theme.in_season():
+            pool += [theme_name] * 3
     return random.choice(pool)
 
 
@@ -1536,7 +1707,7 @@ class Desert(Theme):
 
 
 THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galaxy, Jungle, Desert, Farm,
-                                  Matrix, Neurons, Haunted)}
+                                  Matrix, Neurons, Haunted, Christmas)}
 
 
 def compose(canvas, goal, remaining, total, paused, started_at):
