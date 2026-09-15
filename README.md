@@ -675,7 +675,7 @@ A block that cannot be uploaded when it ends is not lost. It says so, waits in
 you run `focus --sync`:
 
 ```
-Kept on this machine for now — toolkit-api.bang-labs.eu is unreachable.
+Kept on this machine for now — toolkit.bang-labs.eu is unreachable.
 ✓ 25 minutes done — rewrite the intro — 09:40
 ```
 

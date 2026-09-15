@@ -116,7 +116,7 @@ TOKEN_FILE = os.path.join(LOG_DIR, "token")
 PENDING_FILE = os.path.join(LOG_DIR, "pending.jsonl")
 LOG_FIELDS = ["started", "goal", "planned_minutes", "actual_minutes", "completed"]
 
-DEFAULT_API_URL = "https://toolkit-api.bang-labs.eu"
+DEFAULT_API_URL = "https://toolkit.bang-labs.eu"
 DEFAULT_ACCOUNTS_URL = "https://accounts.bang-labs.eu"
 TIMEOUT = 10                       # seconds; a block is over, nobody is waiting
 BATCH = 500                        # blocks per upload, so a long history pages
