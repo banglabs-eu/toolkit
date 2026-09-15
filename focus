@@ -9,11 +9,12 @@ whether you saw it through — is appended to a log you can read back.
     focus                          ask for the goal, then count 25 minutes down
     focus "rewrite the intro"      goal on the command line, same 25 minutes
     focus -m 50 "deep work"        a different length
-    focus -t aquarium "read"       run the block inside an aquarium
+    focus -t aquarium "read"       pick the scene instead of taking pot luck
     focus --preview airport        watch a theme without starting a block
     focus --log                    the sessions so far, today's total on top
 
-Themes draw a scene behind the clock, a frame every tenth of a second:
+Themes draw a scene behind the clock, a frame every tenth of a second. Each
+block takes a random one unless -t or $FOCUS_THEME says otherwise:
 
     plain      nothing but the goal, the clock and the bar
     aquarium   fish crossing the tank, seaweed swaying on the floor,
@@ -31,6 +32,8 @@ Themes draw a scene behind the clock, a frame every tenth of a second:
     matrix     glyph rain down every column, bright head, fading tail
     neurons    cells wired into a net, pulses running the dendrites and
                firing the cell at the far end
+
+`-t plain` is the way back to a bare clock; random never picks it.
 
 While it runs:  space pauses and resumes, q stops early, Ctrl-C does the same.
 
@@ -1108,6 +1111,16 @@ class Galaxy(Theme):
                       [" ·*· ", "*(@)*", " ·*· "], self.CORE, opaque=True)
 
 
+RANDOM = "random"                  # a different scene every block
+
+
+def pick(name):
+    """Resolve a theme name, drawing a scene at random when asked to."""
+    if name == RANDOM:
+        return random.choice([n for n in THEMES if n != Theme.name])
+    return name
+
+
 THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galaxy, Jungle, Farm, Matrix, Neurons)}
 
 
@@ -1200,7 +1213,8 @@ def record(started, goal, planned, actual, completed):
         )
 
 
-def countdown(goal, minutes, theme_name="plain", preview=False):
+def countdown(goal, minutes, theme_name=RANDOM, preview=False):
+    theme_name = pick(theme_name)
     total = minutes * 60.0
     started_at = datetime.now()
     colour = colours_on()
@@ -1305,26 +1319,28 @@ def show_log(limit):
 
 
 def main():
-    default_theme = os.environ.get("FOCUS_THEME", "plain")
-    if default_theme not in THEMES:
-        default_theme = "plain"
+    default_theme = os.environ.get("FOCUS_THEME", RANDOM)
+    if default_theme not in THEMES and default_theme != RANDOM:
+        default_theme = RANDOM
 
     parser = argparse.ArgumentParser(
         prog="focus",
         description="Name a goal, then count %d minutes down against it." % DEFAULT_MINUTES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="themes:\n  " + "\n  ".join(
-            "%-9s %s" % (name, theme.blurb) for name, theme in THEMES.items()
+            ["%-9s %s" % (name, theme.blurb) for name, theme in THEMES.items()]
+            + ["%-9s %s" % (RANDOM, "one of the above, drawn fresh for each block")]
         ) + "\n\nspace pauses, q stops early. Sessions are logged to " + LOG_FILE,
     )
     parser.add_argument("goal", nargs="*", help="what this block is for")
     parser.add_argument("-m", "--minutes", type=float, default=DEFAULT_MINUTES,
                         help="length of the countdown (default: %d)" % DEFAULT_MINUTES)
-    parser.add_argument("-t", "--theme", choices=sorted(THEMES), default=default_theme,
+    parser.add_argument("-t", "--theme", choices=sorted(THEMES) + [RANDOM],
+                        default=default_theme,
                         help="scene behind the clock (default: %s, $FOCUS_THEME)"
                              % default_theme)
-    parser.add_argument("-p", "--preview", metavar="THEME", choices=sorted(THEMES),
-                        nargs="?", const=default_theme,
+    parser.add_argument("-p", "--preview", metavar="THEME",
+                        choices=sorted(THEMES) + [RANDOM], nargs="?", const=default_theme,
                         help="watch a theme run, logging nothing; q to leave")
     parser.add_argument("-l", "--log", action="store_true",
                         help="show the sessions logged so far and exit")

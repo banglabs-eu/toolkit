@@ -380,7 +380,8 @@ focus                          # asks for the goal, then counts 25 minutes down
 focus "rewrite the intro"      # goal on the command line, same 25 minutes
 focus -m 50 "deep work"        # a different length
 focus -t aquarium "read"       # run the block inside an aquarium
-focus -t matrix "refactor"     # or any of the nine themes below
+focus -t matrix "refactor"     # pick one instead of taking pot luck
+focus -t plain "no distractions"   # back to a bare clock
 focus --preview galaxy         # watch a theme, logging nothing
 focus --log                    # sessions so far, today's total on top
 ```
@@ -392,8 +393,10 @@ plays (`paplay`), each skipped quietly if not installed.
 
 #### Themes
 
-`-t` picks what happens behind the clock, a frame every tenth of a second.
-`$FOCUS_THEME` sets the default; a scene costs about 0.3% of one core.
+Every block draws a random scene behind the clock, a frame every tenth of a
+second. `-t` picks one instead, and `$FOCUS_THEME` changes what the default is —
+set it to `plain` for a bare clock, or to a theme name to stop the lottery.
+Random never draws `plain`. A frame costs between 0.2% and 0.9% of one core.
 
 | Theme | What moves |
 |-------|-----------|
@@ -406,6 +409,7 @@ plays (`paplay`), each skipped quietly if not installed.
 | `farm` | barn, silo and turning windmill, hens pecking round the yard, a cow in the field, a tractor going by |
 | `matrix` | glyph rain down every column, bright at the head, fading behind |
 | `neurons` | cells wired into a net, pulses running the dendrites and firing the cell at the far end |
+| `random` | one of the eight scenes, drawn fresh for each block — the default |
 
 An afternoon in the tank, crab included:
 
