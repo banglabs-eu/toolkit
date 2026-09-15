@@ -379,14 +379,91 @@ A pomodoro that insists on the first half of the ritual: name what the block is 
 focus                          # asks for the goal, then counts 25 minutes down
 focus "rewrite the intro"      # goal on the command line, same 25 minutes
 focus -m 50 "deep work"        # a different length
+focus -t aquarium "read"       # run the block inside an aquarium
+focus -t matrix "refactor"     # or any of the nine themes below
+focus --preview galaxy         # watch a theme, logging nothing
 focus --log                    # sessions so far, today's total on top
-focus --log -n 40              # more of the history
 ```
 
 While it runs, `space` pauses and resumes, `q` stops early, and `Ctrl-C` does
 the same. The clock turns amber in the last minute. When it reaches zero the
 terminal bell rings, a desktop notification fires (`notify-send`) and a chime
 plays (`paplay`), each skipped quietly if not installed.
+
+#### Themes
+
+`-t` picks what happens behind the clock, a frame every tenth of a second.
+`$FOCUS_THEME` sets the default; a scene costs about 0.3% of one core.
+
+| Theme | What moves |
+|-------|-----------|
+| `plain` | nothing — the default: goal, clock, bar |
+| `aquarium` | fish crossing the tank, seaweed swaying on the floor, bubbles rising, and once in a while a crab scuttling past or a squid jetting up |
+| `airport` | terminal and control tower along the bottom, departures rolling out and climbing away, arrivals descending onto the runway, helicopters settling on the apron and lifting off again, tugs, clouds |
+| `space` | a twinkling starfield past a ringed planet, rockets under power, satellites blinking, the odd comet |
+| `galaxy` | a spiral galaxy turning slowly, arms of stars wound round a bright core |
+| `jungle` | canopy and hanging vines, parrots and butterflies, a monkey swinging through or a snake crossing the undergrowth |
+| `farm` | barn, silo and turning windmill, hens pecking round the yard, a cow in the field, a tractor going by |
+| `matrix` | glyph rain down every column, bright at the head, fading behind |
+| `neurons` | cells wired into a net, pulses running the dendrites and firing the cell at the far end |
+
+An afternoon in the tank, crab included:
+
+```
+                   <*{{{><
+
+
+                            ship the theme work
+
+                     ██████  ██  ██      ██  ██  ██████
+                         ██  ██  ██  ██  ██  ██  ██
+                ><<<>██████  ██████      ██████  ██████        o
+                     ██          ██  ██      ██      ██
+                     ██████      ██          ██  ██████
+      )       (                                                     ) o
+    O  )      ( ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━        )
+       )      (                )           )       )                )
+       )       25 min · started 09:30 · space pause · q stop       )
+      )        )                )          )        )           )  (
+      )        )                )          )        )           )  (
+      (        )               )          )    o    )   )      )   (     )
+      (        )               )          (        )     )     (   (     )
+      (       )                (          (        (     )     (   (     )
+.            .   ,        .       ,    .       (/\)o,,o(/\)      .  ,
+```
+
+and the same block at the airport, one departure rolling out, one prop on short final:
+
+```
+          .--.
+         (    )
+
+                         .--.                        /|
+                        (   ship the theme work   __/_|__
+                                                 <___o__/
+                     ██████  ██  ██      ██████  ██████
+                         ██  ██  ██  ██  ██      ██
+                     ██████  ██████      ██████  ██████
+                     ██          ██  ██      ██      ██
+                     ██████      ██      ██████  ██████
+
+                ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                              •
+               25 min · started 09:30 · space pause · q stop
+                             │▫│                   ____|_\____
+ ╭───────────────────────╮   ╰┬╯                   \___o____o__>
+ │ ▫   ▫   ▫   ▫   ▫    │     │
+ ╰───────────────────────╯    │
+                              │
+━━━╹━━━━━━━━╹━━━━━━━━╷━━━━━━━━╹━━━━━━━━╹━━━━━━━━╹━━━━━━━━╷━━━━━━━━╹━━━━━━━━╹
+```
+
+Every line of the timer blanks what is behind it, so the scene never mixes
+into the text — a plane crossing the hint is cut by it, not scrambled with it.
+Terminals too narrow for the block digits fall back to a plain `MM:SS`, and the
+airport drops its tower and terminal building rather than overflow.
+
+#### The log
 
 Every session — goal, planned length, how long it actually ran, whether it
 finished — is appended to `~/focus/sessions.csv`, which is what `--log` prints:

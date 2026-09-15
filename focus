@@ -9,7 +9,28 @@ whether you saw it through — is appended to a log you can read back.
     focus                          ask for the goal, then count 25 minutes down
     focus "rewrite the intro"      goal on the command line, same 25 minutes
     focus -m 50 "deep work"        a different length
+    focus -t aquarium "read"       run the block inside an aquarium
+    focus --preview airport        watch a theme without starting a block
     focus --log                    the sessions so far, today's total on top
+
+Themes draw a scene behind the clock, a frame every tenth of a second:
+
+    plain      nothing but the goal, the clock and the bar
+    aquarium   fish crossing the tank, seaweed swaying on the floor,
+               bubbles rising, and once in a while a crab or a squid
+    airport    a terminal and tower along the bottom, departures rolling
+               out and climbing away, arrivals descending onto the runway,
+               helicopters settling on the apron, tugs and clouds
+    space      a twinkling starfield past a ringed planet, with rockets,
+               satellites and comets going through
+    galaxy     a spiral galaxy turning slowly against the field
+    jungle     canopy and hanging vines, parrots and butterflies, with a
+               monkey swinging past or a snake crossing the undergrowth
+    farm       barn, silo and turning windmill, hens pecking round the
+               yard, a cow in the field, a tractor going by
+    matrix     glyph rain down every column, bright head, fading tail
+    neurons    cells wired into a net, pulses running the dendrites and
+               firing the cell at the far end
 
 While it runs:  space pauses and resumes, q stops early, Ctrl-C does the same.
 
@@ -19,7 +40,9 @@ is needed; notify-send and paplay are used for the alarm if they exist.
 
 import argparse
 import csv
+import math
 import os
+import random
 import select
 import shutil
 import signal
@@ -31,13 +54,19 @@ import tty
 from datetime import datetime, timedelta
 
 DEFAULT_MINUTES = 25
+FRAME = 0.1                        # seconds between redraws, so scenes animate
 LOG_DIR = os.path.expanduser("~/focus")
 LOG_FILE = os.path.join(LOG_DIR, "sessions.csv")
 LOG_FIELDS = ["started", "goal", "planned_minutes", "actual_minutes", "completed"]
 
-ACCENT = "\033[38;2;99;102;241m"   # Bang Labs indigo
-AMBER = "\033[38;2;245;158;11m"
-GREEN = "\033[38;2;34;197;94m"
+
+def rgb(r, g, b):
+    return "\033[38;2;%d;%d;%dm" % (r, g, b)
+
+
+ACCENT = rgb(99, 102, 241)         # Bang Labs indigo
+AMBER = rgb(245, 158, 11)
+GREEN = rgb(34, 197, 94)
 BOLD = "\033[1m"
 DIM = "\033[2m"
 RESET = "\033[0m"
@@ -58,6 +87,16 @@ GLYPHS = {
     ":": ("0", "1", "0", "1", "0"),
 }
 GLYPH_ROWS = 5
+
+# Turning a sprite round: reverse each line, then swap the characters that
+# have a handedness. Every sprite below is drawn facing right.
+_FLIP = {"(": ")", ")": "(", "[": "]", "]": "[", "{": "}", "}": "{",
+         "<": ">", ">": "<", "/": "\\", "\\": "/", "d": "b", "b": "d"}
+
+
+def mirror(art):
+    width = max(len(line) for line in art)
+    return ["".join(_FLIP.get(c, c) for c in reversed(line.ljust(width))) for line in art]
 
 
 def colours_on():
@@ -83,61 +122,1039 @@ def clock(seconds):
     return "%02d:%02d" % (seconds // 60, seconds % 60)
 
 
-def centre(line, width, visible=None):
-    pad = max(0, (width - (len(line) if visible is None else visible)) // 2)
-    return " " * pad + line
+def line(x0, y0, x1, y1):
+    """Bresenham, so a dendrite between two cells is a run of adjacent cells."""
+    points = []
+    dx, dy = abs(x1 - x0), -abs(y1 - y0)
+    sx, sy = (1 if x0 < x1 else -1), (1 if y0 < y1 else -1)
+    err = dx + dy
+    while True:
+        points.append((x0, y0))
+        if x0 == x1 and y0 == y1:
+            return points
+        step = 2 * err
+        if step >= dy:
+            err += dy
+            x0 += sx
+        if step <= dx:
+            err += dx
+            y0 += sy
 
 
-def bar(fraction, width):
-    filled = int(round(fraction * width))
-    return "━" * filled, "━" * (width - filled)
+class Canvas:
+    """A grid of characters, each with its own colour, written out in one go.
+
+    Sprites are painted with spaces transparent, so a fish passes behind the
+    clock rather than punching a hole through the scene.
+    """
+
+    def __init__(self, cols, rows, colour=True):
+        self.cols, self.rows = cols, rows
+        self.colour = colour
+        self.chars = [[" "] * cols for _ in range(rows)]
+        self.tints = [[""] * cols for _ in range(rows)]
+
+    def put(self, x, y, text, tint="", opaque=False):
+        x, y = int(x), int(y)
+        if not 0 <= y < self.rows:
+            return
+        chars, tints = self.chars[y], self.tints[y]
+        for i, ch in enumerate(text):
+            col = x + i
+            if not 0 <= col < self.cols or (ch == " " and not opaque):
+                continue
+            chars[col] = ch
+            tints[col] = tint if self.colour else ""
+
+    def sprite(self, x, y, art, tint="", opaque=False):
+        for dy, line in enumerate(art):
+            self.put(x, int(y) + dy, line, tint, opaque)
+
+    def lines(self):
+        out = []
+        for y in range(self.rows):
+            chars, tints = self.chars[y], self.tints[y]
+            end = self.cols
+            while end and chars[end - 1] == " ":
+                end -= 1
+            parts, current = [], ""
+            for x in range(end):
+                if tints[x] != current:
+                    current = tints[x]
+                    parts.append(RESET + current if current else RESET)
+                parts.append(chars[x])
+            if current:
+                parts.append(RESET)
+            out.append("".join(parts))
+        return out
 
 
-def draw(goal, remaining, total, paused, started_at, colour):
-    cols, rows = shutil.get_terminal_size((80, 24))
-    width = max(20, cols)
-    text = clock(remaining)
-    if len(big(text)[0]) <= width - 2:
-        digits, digit_width = big(text), len(big(text)[0])
-    else:                                   # too narrow for block digits
-        digits, digit_width = [text], len(text)
+class Sprite:
+    __slots__ = ("art", "tint", "x", "y", "vx", "vy", "born", "kind",
+                 "phase", "timer", "flip")
 
-    if not colour:
-        tint = bold = dim = reset = ""
-    else:
-        reset, bold, dim = RESET, BOLD, DIM
-        if paused:
-            tint = AMBER
-        elif remaining <= 60:
-            tint = AMBER
+    def __init__(self, art, tint, x, y, vx=0.0, vy=0.0, kind="", flip=False):
+        self.art, self.tint = art, tint
+        self.x, self.y, self.vx, self.vy = float(x), float(y), vx, vy
+        self.born = 0.0
+        self.kind = kind
+        self.phase = ""                    # for anything that runs a little routine
+        self.timer = 0.0
+        self.flip = flip                   # art was mirrored, so new frames must be too
+
+    def move(self, dt):
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+
+    @property
+    def width(self):
+        return max(len(line) for line in self.art)
+
+
+class Theme:
+    """The default: an empty stage, nothing behind the clock."""
+
+    name = "plain"
+    blurb = "just the goal, the clock and the bar"
+
+    def __init__(self):
+        self.last = None
+
+    def tick(self, now):
+        """Seconds since the previous frame, clamped so a stall cannot jump."""
+        dt = 0.0 if self.last is None else min(0.3, now - self.last)
+        self.last = now
+        return dt
+
+    def draw(self, canvas, now):
+        pass
+
+    @staticmethod
+    def advance(canvas, sprites, dt, cols, rows=None):
+        """Move a pool of crossing sprites, drop what has left, draw the rest."""
+        for sprite in list(sprites):
+            sprite.move(dt)
+            off = (sprite.vx >= 0 and sprite.x > cols + 2) or \
+                  (sprite.vx < 0 and sprite.x + sprite.width < 0)
+            if rows is not None and not off:
+                off = sprite.y + len(sprite.art) < 0 or sprite.y > rows
+            if off:
+                sprites.remove(sprite)
+                continue
+            canvas.sprite(sprite.x, sprite.y, sprite.art, sprite.tint)
+
+
+class Aquarium(Theme):
+    name = "aquarium"
+    blurb = "fish, swaying seaweed, and the occasional crab or squid"
+
+    SAND = rgb(125, 105, 75)
+    WEED = rgb(40, 150, 95)
+    BUBBLE = rgb(110, 165, 200)
+    CRAB = rgb(225, 95, 80)
+    SQUID = rgb(195, 130, 220)
+
+    FISH = [
+        (["><>"], rgb(110, 200, 220)),
+        (["><(((°>"], rgb(235, 145, 65)),
+        (["  /\\", "><(((°>", "  \\/"], rgb(240, 200, 90)),
+        (["><}}}*>"], rgb(205, 125, 205)),
+        (["<>>><"], rgb(150, 180, 240)),
+    ]
+    CRAB_FRAMES = [["(\\/)o,,o(\\/)"], ["(/\\)o,,o(/\\)"]]
+    SQUID_FRAMES = [[" .--.", "(o  o)", " ;||;"], [" .--.", "(o  o)", " ;)(;"]]
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.fish, self.bubbles = [], []
+        self.visitor = None
+        self.weeds, self.weed_cols = [], 0
+        self.next_fish = 0.0
+        self.next_bubble = 0.0
+        self.next_visitor = 25.0
+        self.started = None
+
+    # --- the tank itself ---
+
+    def _plant(self, cols, floor):
+        """Seaweed stays where it grew, so it is only re-sown on a resize."""
+        if cols == self.weed_cols:
+            return
+        self.weed_cols = cols
+        self.weeds = []
+        for x in range(1, cols - 1, 5):
+            if random.random() < 0.55:
+                self.weeds.append((x + random.randint(0, 3),
+                                   random.randint(3, max(4, min(9, floor - 4))),
+                                   random.uniform(0, 6.3),
+                                   random.uniform(0.6, 1.4)))
+
+    def _floor(self, canvas, floor):
+        """A sparse, stable scatter of sand — the crab needs something to walk on."""
+        sand = "".join("." if (x * 7) % 13 == 0 else ("," if (x * 5) % 17 == 0 else " ")
+                       for x in range(canvas.cols))
+        canvas.put(0, floor, sand, self.SAND)
+
+    def _seaweed(self, canvas, now, floor):
+        for x, height, phase, speed in self.weeds:
+            for i in range(height):
+                lean = math.sin(now * speed + phase + i * 0.55)
+                canvas.put(x + (1 if lean > 0.6 else 0), floor - 1 - i,
+                           ")" if lean > 0 else "(", self.WEED)
+
+    # --- what lives in it ---
+
+    def _spawn_fish(self, cols, rows, anywhere=False):
+        art, tint = random.choice(self.FISH)
+        height = len(art)
+        if rows - 3 <= 1:
+            return
+        y = random.randint(1, max(1, rows - 3 - height))
+        speed = random.uniform(2.5, 4.0) if height > 1 else random.uniform(3.0, 7.5)
+        if random.random() < 0.5:
+            x = random.uniform(0, cols) if anywhere else -len(max(art, key=len)) - 1
+            self.fish.append(Sprite(art, tint, x, y, speed))
         else:
-            tint = ACCENT
+            art = mirror(art)
+            x = random.uniform(0, cols) if anywhere else cols + 1
+            self.fish.append(Sprite(art, tint, x, y, -speed))
 
-    body = []
-    goal_line = goal if len(goal) <= width - 4 else goal[: width - 5] + "…"
-    body.append(centre(bold + goal_line + reset, width, len(goal_line)))
-    body.append("")
-    for line in digits:
-        body.append(centre(tint + line + reset, width, digit_width))
-    body.append("")
+    def _fish(self, canvas, dt, now, cols, rows):
+        if now >= self.next_fish and len(self.fish) < 7:
+            self._spawn_fish(cols, rows)
+            self.next_fish = now + random.uniform(2.5, 7.0)
+        for fish in list(self.fish):
+            fish.move(dt)
+            if fish.vx > 0 and fish.x > cols or fish.vx < 0 and fish.x + fish.width < 0:
+                self.fish.remove(fish)
+                continue
+            canvas.sprite(fish.x, fish.y, fish.art, fish.tint)
 
-    bar_width = min(44, max(10, width - 10))
-    done, left = bar(1 - remaining / total if total else 1, bar_width)
-    body.append(centre(tint + done + reset + dim + left + reset, width, bar_width))
-    body.append("")
+    def _bubbles(self, canvas, dt, now, cols, rows):
+        if now >= self.next_bubble and len(self.bubbles) < 14:
+            self.bubbles.append(Sprite(["."], self.BUBBLE,
+                                       random.randint(1, max(1, cols - 2)), rows - 2,
+                                       random.uniform(-0.6, 0.6),
+                                       -random.uniform(2.5, 5.0)))
+            self.next_bubble = now + random.uniform(0.4, 1.6)
+        for bubble in list(self.bubbles):
+            bubble.move(dt)
+            if bubble.y < 0:
+                self.bubbles.remove(bubble)
+                continue
+            canvas.put(bubble.x, bubble.y, "oO."[int(bubble.y) % 3], bubble.tint)
+
+    def _visitor(self, canvas, dt, now, cols, rows):
+        """A crab along the floor or a squid rising through the tank, rarely."""
+        if self.visitor is None:
+            if now < self.next_visitor:
+                return
+            if random.random() < 0.6:
+                speed = random.uniform(1.2, 2.2)
+                art = self.CRAB_FRAMES[0]
+                if random.random() < 0.5:
+                    self.visitor = Sprite(art, self.CRAB, -12, rows - 1, speed, kind="crab")
+                else:
+                    self.visitor = Sprite(art, self.CRAB, cols, rows - 1, -speed, kind="crab")
+            else:
+                self.visitor = Sprite(self.SQUID_FRAMES[0], self.SQUID,
+                                      random.randint(2, max(2, cols - 8)), rows - 3,
+                                      random.uniform(-0.8, 0.8),
+                                      -random.uniform(1.1, 1.8), kind="squid")
+            self.visitor.born = now
+
+        guest = self.visitor
+        guest.move(dt)
+        if guest.kind == "crab":
+            guest.art = self.CRAB_FRAMES[int(now * 3) % 2]
+            canvas.sprite(guest.x, rows - 1 - (len(guest.art) - 1), guest.art, guest.tint)
+            gone = guest.x > cols if guest.vx > 0 else guest.x + guest.width < 0
+        else:
+            guest.art = self.SQUID_FRAMES[int(now * 2.5) % 2]
+            canvas.sprite(guest.x, guest.y, guest.art, guest.tint)
+            gone = guest.y + len(guest.art) < 0
+        if gone:
+            self.visitor = None
+            self.next_visitor = now + random.uniform(45.0, 100.0)
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        if self.started is None:
+            self.started = now
+            self.next_visitor = now + random.uniform(20.0, 50.0)
+            for _ in range(4):
+                self._spawn_fish(canvas.cols, canvas.rows, anywhere=True)
+        cols, rows, floor = canvas.cols, canvas.rows, canvas.rows - 1
+        self._plant(cols, floor)
+        self._floor(canvas, floor)
+        self._seaweed(canvas, now, floor)
+        self._bubbles(canvas, dt, now, cols, rows)
+        self._fish(canvas, dt, now, cols, rows)
+        self._visitor(canvas, dt, now, cols, rows)
+
+
+class Airport(Theme):
+    name = "airport"
+    blurb = "a terminal below, departures, arrivals and helicopters over it"
+
+    GROUND = rgb(110, 120, 140)
+    TARMAC = rgb(80, 88, 105)
+    GLASS = rgb(150, 190, 220)
+    PLANE = rgb(220, 225, 235)
+    TAIL = rgb(99, 102, 241)
+    CLOUD = rgb(140, 155, 180)
+    TUG = rgb(210, 200, 120)
+
+    JET = [
+        "      |\\",
+        "  ____|_\\____",
+        "  \\___o____o__>",
+    ]
+    PROP = [
+        "   |\\",
+        " __|_\\__",
+        " \\__o___>",
+    ]
+    HELI = ["  --o--", "+=[___]>", "   ^ ^"]
+    ROTOR = ["  --o--", "  -=o=-"]
+    TUG_ART = ["[oo]="]
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.traffic, self.clouds = [], []
+        self.next_movement = 0.0
+        self.next_tug = 30.0
+        self.next_cloud = 0.0
+        self.started = None
+
+    # --- the field ---
+
+    def _field(self, canvas, now):
+        cols, rows = canvas.cols, canvas.rows
+        runway, apron = rows - 1, rows - 2
+
+        canvas.put(0, runway, "━" * cols, self.TARMAC)
+        for x in range(3, cols, 9):                      # edge lights, blinking
+            lit = (int(now * 1.5) + x // 9) % 4 != 0
+            canvas.put(x, runway, "╹" if lit else "╷", AMBER if lit else self.TARMAC)
+
+        width = max(16, min(34, cols // 3))
+        if cols < 26 or rows < 12:
+            return
+        top = apron - 3
+        canvas.put(1, top, "╭" + "─" * (width - 2) + "╮", self.GROUND)
+        windows = "".join("▫ " if i % 2 == 0 else "  " for i in range((width - 4) // 2))
+        canvas.put(1, top + 1, "│ ", self.GROUND)
+        canvas.put(3, top + 1, windows[: width - 4], self.GLASS)
+        canvas.put(width - 1, top + 1, "│", self.GROUND)
+        canvas.put(1, top + 2, "╰" + "─" * (width - 2) + "╯", self.GROUND)
+
+        tower = width + 4
+        if tower + 4 < cols and rows >= 16:   # a short terminal has no room for it
+            beacon = int(now * 1.2) % 2
+            canvas.put(tower + 1, top - 3, "•", GREEN if beacon else AMBER)
+            canvas.put(tower, top - 2, "╭─╮", self.GROUND)
+            canvas.put(tower, top - 1, "│▫│", self.GLASS)
+            canvas.put(tower, top, "╰┬╯", self.GROUND)
+            for y in range(top + 1, apron + 1):
+                canvas.put(tower + 1, y, "│", self.GROUND)
+
+    # --- the traffic ---
+
+    def _helicopter(self, cols, rows):
+        """In from one side, down onto the apron, a pause, then up and away."""
+        flip = random.random() < 0.5
+        art = mirror(self.HELI) if flip else self.HELI
+        speed = random.uniform(5.0, 8.0)
+        heli = Sprite(art, self.PLANE, cols + 2 if flip else -10,
+                      random.randint(2, max(2, rows // 3)),
+                      -speed if flip else speed, 0.0, kind="helicopter", flip=flip)
+        heli.phase = "inbound"
+        heli.timer = cols * random.uniform(0.5, 0.75)    # where the pad is
+        return heli
+
+    def _movement(self, cols, rows):
+        """A departure rolling out and climbing, or an arrival coming down."""
+        if random.random() < 0.3:
+            return self._helicopter(cols, rows)
+        art = self.JET if random.random() < 0.7 else self.PROP
+        ground = rows - 1 - len(art)
+        if random.random() < 0.5:
+            plane = Sprite(art, self.PLANE, -len(max(art, key=len)) - 2, ground,
+                           random.uniform(7.0, 10.0), kind="departure")
+        else:
+            speed = random.uniform(9.0, 13.0)
+            plane = Sprite(mirror(art), self.PLANE, cols + 2, 1, -speed, 0.0, kind="arrival")
+            # Descend so the wheels meet the tarmac about two thirds of the way across.
+            plane.vy = (ground - 1) / (cols * 0.66 / speed)
+        return plane
+
+    def _traffic(self, canvas, dt, now, cols, rows):
+        if now >= self.next_movement and len(self.traffic) < 3:
+            self.traffic.append(self._movement(cols, rows))
+            self.next_movement = now + random.uniform(7.0, 16.0)
+        if now >= self.next_tug:                         # something on the apron
+            heading = random.choice((-1, 1))
+            art = self.TUG_ART if heading > 0 else mirror(self.TUG_ART)
+            self.traffic.append(Sprite(art, self.TUG, -6 if heading > 0 else cols + 2,
+                                       rows - 2, heading * random.uniform(3.0, 5.0),
+                                       kind="tug"))
+            self.next_tug = now + random.uniform(25.0, 60.0)
+
+        for plane in list(self.traffic):
+            plane.move(dt)
+            wheels = rows - 1 - len(plane.art)
+            if plane.kind == "departure":
+                plane.vx = min(plane.vx + 4.0 * dt, 18.0)
+                if plane.x > cols * 0.4:                 # rotate, then climb away
+                    plane.vy = -3.0
+            elif plane.kind == "arrival":
+                if plane.y >= wheels:                    # touchdown, then roll out
+                    plane.y, plane.vy = wheels, 0.0
+                    plane.vx = min(plane.vx + 6.0 * dt, -3.0)
+            elif plane.kind == "helicopter":
+                frame = self.ROTOR[int(now * 9) % 2]
+                plane.art = [mirror([frame])[0] if plane.flip else frame] + plane.art[1:]
+                if plane.phase == "inbound" and abs(plane.x - plane.timer) < 2.5:
+                    plane.vx, plane.vy, plane.phase = 0.0, 2.6, "descending"
+                elif plane.phase == "descending" and plane.y >= wheels:
+                    plane.y, plane.vy = wheels, 0.0
+                    plane.phase, plane.timer = "parked", now + random.uniform(4.0, 9.0)
+                elif plane.phase == "parked" and now >= plane.timer:
+                    plane.vy, plane.phase = -2.2, "lifting"
+                elif plane.phase == "lifting" and plane.y <= 2:
+                    plane.vy = 0.0
+                    plane.vx = -6.0 if plane.flip else 6.0
+                    plane.phase = "outbound"
+
+            gone_right = plane.vx > 0 and plane.x > cols + 2
+            gone_left = plane.vx < 0 and plane.x + plane.width < 0
+            if gone_right or gone_left or plane.y + len(plane.art) < 0:
+                self.traffic.remove(plane)
+                continue
+
+            # The top line of a plane is its tail fin, and wears the tail colour.
+            if plane.kind == "helicopter":
+                canvas.sprite(plane.x, plane.y, plane.art, plane.tint)
+            elif len(plane.art) > 1:
+                canvas.put(plane.x, plane.y, plane.art[0], self.TAIL)
+                canvas.sprite(plane.x, plane.y + 1, plane.art[1:], plane.tint)
+            else:
+                canvas.sprite(plane.x, plane.y, plane.art, plane.tint)
+
+    def _clouds(self, canvas, dt, now, cols, rows):
+        if now >= self.next_cloud and len(self.clouds) < 3:
+            self.clouds.append(Sprite([" .--.", "(    )"], self.CLOUD,
+                                      -7, random.randint(0, max(0, rows // 3)),
+                                      random.uniform(0.5, 1.3)))
+            self.next_cloud = now + random.uniform(18.0, 40.0)
+        for cloud in list(self.clouds):
+            cloud.move(dt)
+            if cloud.x > cols:
+                self.clouds.remove(cloud)
+                continue
+            canvas.sprite(cloud.x, cloud.y, cloud.art, cloud.tint)
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if self.started is None:
+            self.started = now
+            self.next_movement = now + 1.0
+            self.next_tug = now + random.uniform(15.0, 40.0)
+            for i in range(2):
+                self.clouds.append(Sprite([" .--.", "(    )"], self.CLOUD,
+                                          random.randint(0, cols), random.randint(0, rows // 3),
+                                          random.uniform(0.5, 1.3)))
+            self.next_cloud = now + random.uniform(15.0, 30.0)
+        self._clouds(canvas, dt, now, cols, rows)
+        self._field(canvas, now)
+        self._traffic(canvas, dt, now, cols, rows)
+
+
+class Space(Theme):
+    name = "space"
+    blurb = "a twinkling starfield, a ringed planet, rockets and comets"
+
+    FAR = rgb(120, 128, 155)
+    NEAR = rgb(215, 220, 240)
+    PLANET = rgb(205, 145, 95)
+    HULL = rgb(225, 228, 238)
+    PANEL = rgb(120, 150, 210)
+    COMET = rgb(165, 215, 255)
+    FLAME = rgb(250, 160, 60)
+
+    PLANET_ART = ["    .--.", " -=(    )=-", "    '--'"]
+    ROCKET = [" /|", "(====>", " \\|"]
+    SATELLITE = ["[#]-o-[#]"]
+    COMET_ART = [".·-=o"]
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.stars, self.sky = [], (0, 0)
+        self.craft = []
+        self.next_craft = 0.0
+        self.started = None
+
+    def _starfield(self, canvas, now):
+        cols, rows = canvas.cols, canvas.rows
+        if (cols, rows) != self.sky:                     # stars keep their places
+            self.sky = (cols, rows)
+            self.stars = []
+            for _ in range((cols * rows) // 22):
+                self.stars.append((random.randrange(cols), random.randrange(rows),
+                                   random.uniform(0, 6.3), random.random()))
+        for x, y, phase, size in self.stars:
+            twinkle = math.sin(now * 1.6 + phase)
+            if size > 0.93:
+                char, tint = ("+" if twinkle > 0 else "*"), self.NEAR
+            elif size > 0.6:
+                char, tint = ("·" if twinkle > -0.4 else "*"), self.NEAR
+            else:
+                char, tint = ".", self.FAR
+            canvas.put(x, y, char, tint)
+
+    def _launch(self, cols, rows):
+        kind = random.random()
+        y = random.randint(1, max(1, rows - 4))
+        if kind < 0.45:
+            art, speed = self.ROCKET, random.uniform(6.0, 11.0)
+            craft = Sprite(art, self.HULL, -8, y, speed, -random.uniform(0.0, 0.5),
+                           kind="rocket")
+        elif kind < 0.8:
+            art, speed = self.SATELLITE, random.uniform(1.5, 3.0)
+            craft = Sprite(art, self.PANEL, -10, y, speed, 0.0, kind="satellite")
+        else:
+            craft = Sprite(self.COMET_ART, self.COMET, cols + 4, random.randint(0, rows // 2),
+                           -random.uniform(22.0, 34.0), random.uniform(1.5, 3.0), kind="comet")
+        if craft.vx > 0 and random.random() < 0.5:       # half of them fly the other way
+            craft.art = mirror(craft.art)
+            craft.x, craft.vx = cols + 4, -craft.vx
+        return craft
+
+    def _traffic(self, canvas, dt, now, cols, rows):
+        if now >= self.next_craft and len(self.craft) < 2:
+            self.craft.append(self._launch(cols, rows))
+            self.next_craft = now + random.uniform(11.0, 26.0)
+        for craft in list(self.craft):
+            if craft.kind == "rocket":                   # exhaust, trailing the fins
+                tail = craft.x - 2 if craft.vx > 0 else craft.x + craft.width
+                canvas.put(tail, craft.y + 1, "≈~-"[int(now * 12) % 3] * 2, self.FLAME)
+            elif craft.kind == "satellite":
+                canvas.put(craft.x + 4, craft.y - 1, "•" if int(now * 2) % 2 else " ",
+                           GREEN)
+        self.advance(canvas, self.craft, dt, cols, rows)
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if self.started is None:
+            self.started = now
+            self.next_craft = now + random.uniform(2.0, 8.0)
+        self._starfield(canvas, now)
+        if cols > 40 and rows > 10:
+            canvas.sprite(cols - 14, 1, self.PLANET_ART, self.PLANET, opaque=True)
+        self._traffic(canvas, dt, now, cols, rows)
+
+
+class Jungle(Theme):
+    name = "jungle"
+    blurb = "canopy and hanging vines, parrots, butterflies, a monkey now and then"
+
+    DARK = rgb(35, 110, 55)
+    LEAF = rgb(70, 160, 80)
+    VINE = rgb(95, 145, 70)
+    SCRUB = rgb(55, 130, 70)
+    MONKEY = rgb(150, 110, 70)
+    SNAKE = rgb(120, 180, 75)
+    WINGS = [rgb(230, 80, 70), rgb(240, 200, 80), rgb(90, 150, 230)]
+    FLUTTER = [rgb(215, 120, 210), rgb(120, 205, 210)]
+
+    BIRD = [["~^~"], ["~v~"]]
+    MOTH = [[">|<"], ["}|{"]]
+    APE = [" |", "(o.o)", " /\\"]
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.canopy, self.vines, self.scrub = [], [], []
+        self.grown = 0
+        self.birds, self.moths = [], []
+        self.next_bird = 0.0
+        self.next_moth = 0.0
+        self.visitor = None
+        self.next_visitor = 30.0
+        self.started = None
+
+    def _grow(self, cols, rows):
+        if cols == self.grown:
+            return
+        self.grown = cols
+        self.canopy = [random.randint(0, 2) for _ in range(cols)]
+        self.vines = []
+        for x in range(1, cols - 1, 11):
+            if random.random() < 0.75:
+                self.vines.append((x + random.randint(0, 7),
+                                   random.randint(3, max(4, rows // 2)),
+                                   random.uniform(0, 6.3), random.uniform(0.5, 1.1)))
+        self.scrub = [random.choice("vVw^") if random.random() < 0.22 else " "
+                      for _ in range(cols)]
+
+    def _leaves(self, canvas, now, cols):
+        for x, depth in enumerate(self.canopy):
+            sway = int(round(math.sin(now * 0.7 + x * 0.22)))
+            for y in range(depth):
+                edge = y == depth - 1
+                canvas.put(x + (sway if edge else 0), y, "%&*^"[(x + y) % 4],
+                           self.LEAF if edge else self.DARK)
+
+    def _hang(self, canvas, now):
+        for x, length, phase, speed in self.vines:
+            for i in range(length):
+                swing = math.sin(now * speed + phase) * (i / length) * 2.5
+                canvas.put(x + int(round(swing)), self.canopy[min(x, len(self.canopy) - 1)] + i,
+                           "|" if i % 5 else "o", self.VINE)
+
+    def _floor(self, canvas, rows):
+        canvas.put(0, rows - 1, "".join(self.scrub), self.SCRUB)
+
+    def _wildlife(self, canvas, dt, now, cols, rows):
+        if now >= self.next_bird and len(self.birds) < 3:
+            heading = random.choice((-1, 1))
+            bird = Sprite(self.BIRD[0], random.choice(self.WINGS),
+                          -4 if heading > 0 else cols + 2,
+                          random.randint(2, max(2, rows // 2)),
+                          heading * random.uniform(6.0, 12.0))
+            self.birds.append(bird)
+            self.next_bird = now + random.uniform(4.0, 11.0)
+        for bird in self.birds:
+            bird.art = self.BIRD[int(now * 6) % 2]
+        self.advance(canvas, self.birds, dt, cols)
+
+        if now >= self.next_moth and len(self.moths) < 4:
+            heading = random.choice((-1, 1))
+            self.moths.append(Sprite(self.MOTH[0], random.choice(self.FLUTTER),
+                                     -3 if heading > 0 else cols + 2,
+                                     random.randint(1, max(1, rows - 3)),
+                                     heading * random.uniform(1.5, 3.5)))
+            self.next_moth = now + random.uniform(3.0, 9.0)
+        for moth in self.moths:
+            moth.art = self.MOTH[int(now * 7) % 2]
+            moth.vy = math.sin(now * 3.0 + moth.x) * 1.6
+        self.advance(canvas, self.moths, dt, cols, rows)
+
+    def _visitor(self, canvas, dt, now, cols, rows):
+        """A monkey swinging off a vine, or a snake crossing the undergrowth."""
+        if self.visitor is None:
+            if now < self.next_visitor:
+                return
+            if random.random() < 0.5:
+                self.visitor = Sprite(self.APE, self.MONKEY,
+                                      random.randint(6, max(6, cols - 10)), 4,
+                                      random.uniform(-2.0, 2.0), 0.0, kind="monkey")
+            else:
+                heading = random.choice((-1, 1))
+                self.visitor = Sprite([""], self.SNAKE,
+                                      -14 if heading > 0 else cols + 14, rows - 2,
+                                      heading * random.uniform(4.0, 7.0), 0.0, kind="snake")
+            self.visitor.born = now
+
+        guest = self.visitor
+        guest.move(dt)
+        if guest.kind == "monkey":
+            swing = math.sin((now - guest.born) * 1.8) * 6
+            top = self.canopy[min(int(guest.x), len(self.canopy) - 1)] if self.canopy else 1
+            for y in range(top, int(guest.y)):           # the vine it swings from
+                canvas.put(guest.x + 1 + int(round(swing * (y - top) / max(1, guest.y - top))),
+                           y, "|", self.VINE)
+            canvas.sprite(guest.x + int(round(swing)), guest.y, guest.art, guest.tint)
+            gone = guest.x < -8 or guest.x > cols + 8
+        else:
+            length = 12
+            head = "><"[guest.vx > 0] if False else (">" if guest.vx > 0 else "<")
+            for i in range(length):
+                x = guest.x - i if guest.vx > 0 else guest.x + i
+                canvas.put(x, rows - 2 + int(round(math.sin(now * 4 + i * 0.7) * 0.5)),
+                           head if i == 0 else "~", self.SNAKE)
+            gone = guest.x - length > cols if guest.vx > 0 else guest.x + length < 0
+        if gone:
+            self.visitor = None
+            self.next_visitor = now + random.uniform(40.0, 90.0)
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if self.started is None:
+            self.started = now
+            self.next_visitor = now + random.uniform(20.0, 45.0)
+        self._grow(cols, rows)
+        self._leaves(canvas, now, cols)
+        self._hang(canvas, now)
+        self._floor(canvas, rows)
+        self._wildlife(canvas, dt, now, cols, rows)
+        self._visitor(canvas, dt, now, cols, rows)
+
+
+class Farm(Theme):
+    name = "farm"
+    blurb = "barn, silo and turning windmill, hens in the yard, a tractor going by"
+
+    SUN = rgb(250, 205, 90)
+    CLOUD = rgb(205, 210, 220)
+    BARN = rgb(190, 75, 60)
+    ROOF = rgb(140, 55, 45)
+    SILO = rgb(175, 180, 190)
+    TIMBER = rgb(165, 135, 100)
+    GRASS = rgb(120, 175, 85)
+    WHEAT = rgb(220, 190, 105)
+    HEN = rgb(240, 238, 228)
+    COMB = rgb(220, 80, 70)
+    COW = rgb(235, 235, 235)
+    TRACTOR = rgb(95, 155, 75)
+    SMOKE = rgb(150, 150, 160)
+
+    BARN_ART = ["   _____", "  /     \\", " /_______\\", " |  ___  |", " |_|___|_|"]
+    SILO_ART = [" ___ ", "(   )", "|   |", "|   |", "|___|"]
+    BLADES = [[" \\ /", "  o  ", " / \\"], ["  |  ", " -o- ", "  |  "]]
+    HEN_ART = [[" ,", "(°>", " ^"], [" ,", "(°_", " ^"]]
+    COW_ART = ["  ^__^", " (oo)\\___", " (__)   )"]
+    TRACTOR_ART = ["   __", "  |__|_", " (O)_(o)"]
+    BIRD = [["~^~"], ["~v~"]]
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.crop, self.sown, self.fence = [], 0, (1, 10)
+        self.hens, self.sky, self.yard = [], [], []
+        self.next_tractor = 0.0
+        self.next_bird = 0.0
+        self.cow_x = 0
+        self.started = None
+
+    def _sow(self, cols, rows):
+        if cols == self.sown:
+            return
+        self.sown = cols
+        self.crop = [(x, random.uniform(0, 6.3)) for x in range(0, cols, 2)
+                     if random.random() < 0.8]
+        self.cow_x = random.randint(cols // 2, max(cols // 2, cols - 12))
+        # The yard is the open ground between the silo and the windmill.
+        self.fence = (20, max(24, cols - 11)) if cols >= 34 else (1, max(4, cols - 5))
+        self.hens = []
+        for _ in range(3):
+            self.hens.append(Sprite(self.HEN_ART[0], self.HEN,
+                                    random.randint(*self.fence), rows - 5,
+                                    random.choice((-1, 1)) * random.uniform(1.0, 2.2),
+                                    kind="hen"))
+
+    def _field(self, canvas, now, cols, rows):
+        for x, phase in self.crop:                       # wheat, leaning in the wind
+            lean = math.sin(now * 1.1 + phase + x * 0.12)
+            canvas.put(x, rows - 2, "*" if lean > 0 else "v", self.WHEAT)
+            canvas.put(x, rows - 1, "|", self.WHEAT if lean > 0.7 else self.GRASS)
+
+    def _buildings(self, canvas, now, cols, rows):
+        base = rows - 3                                  # everything stands on the yard
+        if rows < 12 or cols < 34:
+            return
+        top = base - len(self.BARN_ART) + 1
+        canvas.sprite(2, top, self.BARN_ART[:3], self.ROOF, opaque=True)
+        canvas.sprite(2, top + 3, self.BARN_ART[3:], self.BARN, opaque=True)
+        canvas.sprite(13, base - len(self.SILO_ART) + 1, self.SILO_ART, self.SILO, opaque=True)
+
+        mill = cols - 9
+        canvas.sprite(mill, base - 5, self.BLADES[int(now * 5) % 2], self.TIMBER)
+        for y in range(base - 2, base + 1):
+            canvas.put(mill + 2, y, "║", self.TIMBER)
+        canvas.put(mill + 1, base, "╱╲", self.TIMBER)
+
+        post = self.fence[0]
+        while post < mill - 2:                           # a rail between yard and field
+            canvas.put(post, base, "─┼──", self.TIMBER)
+            post += 4
+
+    def _stock(self, canvas, dt, now, cols, rows):
+        canvas.sprite(self.cow_x, rows - 5, self.COW_ART, self.COW, opaque=True)
+        canvas.put(self.cow_x - 1, rows - 4, "\\" if int(now * 1.5) % 2 else "/", self.COW)
+
+        for hen in self.hens:
+            hen.move(dt)
+            left, right = self.fence
+            if hen.x < left or hen.x > right:            # turn round at the yard edge
+                hen.vx = -hen.vx
+                hen.art = mirror(hen.art)
+                hen.x = min(max(hen.x, left), right)
+            pecking = math.sin(now * 2.0 + hen.y + hen.x * 0.1) > 0.75
+            art = self.HEN_ART[1 if pecking else 0]
+            if hen.vx < 0:
+                art = mirror(art)
+            canvas.sprite(hen.x, hen.y, art, hen.tint)
+            canvas.put(hen.x + (1 if hen.vx > 0 else 0), hen.y, ",", self.COMB)
+
+        if now >= self.next_tractor:
+            heading = random.choice((-1, 1))
+            art = self.TRACTOR_ART if heading > 0 else mirror(self.TRACTOR_ART)
+            self.yard.append(Sprite(art, self.TRACTOR, -10 if heading > 0 else cols + 2,
+                                    rows - 5, heading * random.uniform(4.0, 7.0),
+                                    kind="tractor"))
+            self.next_tractor = now + random.uniform(30.0, 70.0)
+        for machine in self.yard:
+            canvas.put(machine.x + (3 if machine.vx > 0 else machine.width - 4),
+                       machine.y - 1, "o°·"[int(now * 4) % 3], self.SMOKE)
+        self.advance(canvas, self.yard, dt, cols)
+
+        if now >= self.next_bird and len(self.sky) < 3:
+            heading = random.choice((-1, 1))
+            self.sky.append(Sprite(self.BIRD[0], self.SMOKE,
+                                   -4 if heading > 0 else cols + 2,
+                                   random.randint(1, max(1, rows // 3)),
+                                   heading * random.uniform(5.0, 9.0)))
+            self.next_bird = now + random.uniform(8.0, 20.0)
+        for bird in self.sky:
+            bird.art = self.BIRD[int(now * 5) % 2]
+        self.advance(canvas, self.sky, dt, cols)
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if self.started is None:
+            self.started = now
+            self.next_tractor = now + random.uniform(10.0, 30.0)
+        self._sow(cols, rows)
+        if cols > 30:
+            canvas.sprite(cols - 7, 0, [" \\|/", "-(_)-", " /|\\"], self.SUN)
+        self._field(canvas, now, cols, rows)
+        self._buildings(canvas, now, cols, rows)
+        self._stock(canvas, dt, now, cols, rows)
+
+
+
+class Matrix(Theme):
+    name = "matrix"
+    blurb = "glyph rain down the columns, bright at the head, fading behind"
+
+    HEAD = rgb(215, 255, 215)
+    BODY = rgb(60, 220, 90)
+    TRAIL = rgb(22, 110, 45)
+    RAIN = ("ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ"
+            "0123456789:=*+-<>|")
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.drops, self.width = {}, 0
+
+    def _drop(self, rows, high=True):
+        length = random.randint(4, max(5, rows - 6))
+        return [-random.uniform(0, rows if high else rows // 3),
+                random.uniform(5.0, 20.0),
+                [random.choice(self.RAIN) for _ in range(length)]]
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if cols != self.width:
+            self.width = cols
+            self.drops = {x: self._drop(rows) for x in range(cols) if random.random() < 0.75}
+        for x, drop in self.drops.items():
+            drop[0] += drop[1] * dt
+            chars = drop[2]
+            if random.random() < 0.3:                    # glyphs flicker as they fall
+                chars[random.randrange(len(chars))] = random.choice(self.RAIN)
+            head = int(drop[0])
+            for i, char in enumerate(chars):
+                y = head - i
+                if 0 <= y < rows:
+                    canvas.put(x, y, char,
+                               self.HEAD if i == 0 else
+                               self.BODY if i < 4 else self.TRAIL)
+            if head - len(chars) > rows:
+                self.drops[x] = self._drop(rows, high=False)
+
+
+class Neurons(Theme):
+    name = "neurons"
+    blurb = "cells wired into a net, pulses running the dendrites, one firing at a time"
+
+    WIRE = rgb(58, 66, 105)
+    CELL = rgb(130, 140, 190)
+    FIRING = rgb(240, 230, 255)
+    PULSE = rgb(140, 200, 255)
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.cells, self.wires, self.size = [], [], (0, 0)
+        self.pulses, self.lit = [], {}
+        self.next_spark = 0.0
+
+    def _wire(self, cols, rows):
+        """Scatter cells, then wire each to its two nearest neighbours."""
+        self.size = (cols, rows)
+        self.cells, self.wires, self.pulses, self.lit = [], [], [], {}
+        tries = 0
+        while len(self.cells) < max(8, min(26, cols * rows // 70)) and tries < 600:
+            tries += 1
+            spot = (random.randrange(2, max(3, cols - 2)), random.randrange(1, max(2, rows - 1)))
+            if all(abs(spot[0] - c[0]) + abs(spot[1] - c[1]) * 2 > 7 for c in self.cells):
+                self.cells.append(spot)
+        seen = set()
+        for i, cell in enumerate(self.cells):
+            def span(j, here=cell):
+                return (self.cells[j][0] - here[0]) ** 2 + ((self.cells[j][1] - here[1]) * 2) ** 2
+            for j in sorted(range(len(self.cells)), key=span)[1:3]:
+                pair = (min(i, j), max(i, j))
+                if pair in seen or span(j) > 34 ** 2:    # no cables across the whole net
+                    continue
+                seen.add(pair)
+                self.wires.append((i, j, line(cell[0], cell[1],
+                                              self.cells[j][0], self.cells[j][1])))
+
+    def _fire(self, cell, now, spread=True):
+        self.lit[cell] = now
+        if not spread:
+            return
+        for w, (a, b, path) in enumerate(self.wires):
+            if cell in (a, b) and len(self.pulses) < 14 and random.random() < 0.65:
+                self.pulses.append([w, 0.0, random.uniform(0.5, 1.1), cell == b])
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if (cols, rows) != self.size:
+            self._wire(cols, rows)
+        if not self.cells:
+            return
+
+        for _, _, path in self.wires:                    # the dendrites themselves
+            run = (path[-1][0] - path[0][0], path[-1][1] - path[0][1])
+            char = ("-" if abs(run[1]) * 2 < abs(run[0]) else
+                    "|" if abs(run[0]) < abs(run[1]) else
+                    "\\" if run[0] * run[1] > 0 else "/")
+            for x, y in path:
+                canvas.put(x, y, char, self.WIRE)
+
+        for pulse in list(self.pulses):                  # charge running along them
+            pulse[1] += pulse[2] * dt
+            path = self.wires[pulse[0]][2]
+            if pulse[1] >= 1.0:
+                self.pulses.remove(pulse)
+                target = self.wires[pulse[0]][0 if pulse[3] else 1]
+                self._fire(target, now, spread=random.random() < 0.7)
+                continue
+            where = pulse[1] if not pulse[3] else 1.0 - pulse[1]
+            at = path[min(len(path) - 1, int(where * (len(path) - 1)))]
+            canvas.put(at[0], at[1], "•", self.PULSE)
+
+        for i, (x, y) in enumerate(self.cells):          # the cells, lit or resting
+            age = now - self.lit.get(i, -9.9)
+            if age < 0.5:
+                canvas.put(x - 1, y, "(O)", self.FIRING)
+            elif age < 1.2:
+                canvas.put(x, y, "O", self.FIRING)
+            else:
+                canvas.put(x, y, "o", self.CELL)
+
+        if now >= self.next_spark:                       # something has to start it
+            self._fire(random.randrange(len(self.cells)), now)
+            self.next_spark = now + random.uniform(1.5, 4.5)
+
+
+class Galaxy(Theme):
+    name = "galaxy"
+    blurb = "a spiral galaxy turning slowly, arms of stars around a bright core"
+
+    CORE = rgb(255, 246, 215)
+    INNER = rgb(232, 200, 255)
+    ARM = rgb(150, 170, 245)
+    OUTER = rgb(96, 110, 180)
+    FIELD = rgb(115, 122, 150)
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.stars, self.jitter, self.size = [], [], (0, 0)
+
+    def _seed(self, cols, rows):
+        self.size = (cols, rows)
+        self.stars = [(random.randrange(cols), random.randrange(rows),
+                       random.uniform(0, 6.3)) for _ in range((cols * rows) // 40)]
+        self.jitter = [(random.uniform(-1.2, 1.2), random.uniform(-0.6, 0.6))
+                       for _ in range(600)]
+
+    def draw(self, canvas, now):
+        self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if (cols, rows) != self.size:
+            self._seed(cols, rows)
+
+        for x, y, phase in self.stars:                   # the field it sits in
+            canvas.put(x, y, "." if math.sin(now * 1.3 + phase) < 0.7 else "·", self.FIELD)
+
+        cx, cy = cols * 0.71, rows * 0.32
+        reach = min(cols / 3.1, rows / 1.55)
+        spin = now * 0.07
+        index = 0
+        for arm in range(2):
+            radius = 0.6
+            while radius < reach:
+                angle = spin + arm * math.pi + radius * 0.62
+                wobble = self.jitter[index % len(self.jitter)]
+                index += 1
+                x = cx + math.cos(angle) * radius * 2.05 + wobble[0]
+                y = cy + math.sin(angle) * radius + wobble[1]
+                near = radius / reach
+                canvas.put(x, y, "*" if near < 0.35 else "·" if near < 0.7 else ".",
+                           self.INNER if near < 0.3 else
+                           self.ARM if near < 0.72 else self.OUTER)
+                radius += 0.12
+
+        canvas.sprite(int(cx) - 2, int(cy) - 1,                      # the core
+                      [" ·*· ", "*(@)*", " ·*· "], self.CORE, opaque=True)
+
+
+THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galaxy, Jungle, Farm, Matrix, Neurons)}
+
+
+def compose(canvas, goal, remaining, total, paused, started_at):
+    """The goal, the clock, the bar and the hint, centred over whatever scene."""
+    cols, rows = canvas.cols, canvas.rows
+    tint = AMBER if paused or remaining <= 60 else ACCENT
+
+    text = clock(remaining)
+    digits = big(text)
+    if len(digits[0]) > cols - 2:                        # too narrow for block digits
+        digits = [text]
+
+    goal_line = goal if len(goal) <= cols - 4 else goal[: cols - 5] + "…"
+
+    bar_width = min(44, max(10, cols - 10))
+    filled = int(round((1 - remaining / total if total else 1) * bar_width))
 
     length = "%g min" % (total / 60) if total % 60 else "%d min" % (total // 60)
     state = "paused" if paused else "started " + started_at.strftime("%H:%M")
     keys = "space %s · q stop" % ("resume" if paused else "pause")
     for hint in ("%s · %s · %s" % (length, state, keys), "%s · %s" % (length, keys), keys):
-        if len(hint) <= width - 2:
+        if len(hint) <= cols - 2:
             break
-    body.append(centre(dim + hint + reset, width, len(hint)))
 
-    top = max(0, (rows - len(body)) // 2)
+    # Every line blanks what is behind it, so a scene never intrudes into the
+    # text: a plane crossing the hint is cut by it rather than mixed into it.
+    lines = [[(" " + goal_line + " ", BOLD)], []]
+    lines += [[(row, tint)] for row in digits]
+    lines += [[], [("━" * filled, tint), ("━" * (bar_width - filled), DIM)], []]
+    lines += [[(" " + hint + " ", DIM)]]
+
+    top = max(0, (rows - len(lines)) // 2)
+    for i, segments in enumerate(lines):
+        x = max(0, (cols - sum(len(s) for s, _ in segments)) // 2)
+        for text, seg_tint in segments:
+            canvas.put(x, top + i, text, seg_tint, opaque=True)
+            x += len(text)
+
+
+def frame(canvas):
     out = ["\033[H"]
-    for line in [""] * top + body:
-        out.append(line + "\033[K\n")
+    lines = canvas.lines()
+    for i, line in enumerate(lines):
+        out.append(line + "\033[K")
+        if i < len(lines) - 1:
+            out.append("\n")
     out.append("\033[J")
     sys.stdout.write("".join(out))
     sys.stdout.flush()
@@ -183,11 +1200,12 @@ def record(started, goal, planned, actual, completed):
         )
 
 
-def countdown(goal, minutes):
+def countdown(goal, minutes, theme_name="plain", preview=False):
     total = minutes * 60.0
     started_at = datetime.now()
     colour = colours_on()
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    theme = THEMES[theme_name]()
 
     remaining = total
     paused = False
@@ -203,12 +1221,16 @@ def countdown(goal, minutes):
     completed = False
     try:
         while True:
+            now = time.monotonic()
             if not paused:
-                now = time.monotonic()
                 remaining = max(0.0, remaining - (now - resumed_at))
-                resumed_at = now
+            resumed_at = now
             if interactive:
-                draw(goal, remaining, total, paused, started_at, colour)
+                cols, rows = shutil.get_terminal_size((80, 24))
+                canvas = Canvas(max(20, cols), max(8, rows), colour)
+                theme.draw(canvas, now)
+                compose(canvas, goal, remaining, total, paused, started_at)
+                frame(canvas)
             if remaining <= 0:
                 completed = True
                 break
@@ -217,7 +1239,7 @@ def countdown(goal, minutes):
                 time.sleep(min(remaining, 1.0))
                 continue
 
-            ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+            ready, _, _ = select.select([sys.stdin], [], [], FRAME)
             if not ready:
                 continue
             key = sys.stdin.read(1)
@@ -225,7 +1247,6 @@ def countdown(goal, minutes):
                 break
             if key == " ":
                 paused = not paused
-                resumed_at = time.monotonic()
     except KeyboardInterrupt:
         pass
     finally:
@@ -235,6 +1256,10 @@ def countdown(goal, minutes):
             termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_attrs)
 
     actual = (total - remaining) / 60.0
+    if preview:
+        print("Preview of the %s theme — %s" % (theme_name, THEMES[theme_name].blurb))
+        return 0
+
     record(started_at, goal, minutes, actual, completed)
     if completed:
         alarm(goal, minutes, colour)
@@ -280,15 +1305,27 @@ def show_log(limit):
 
 
 def main():
+    default_theme = os.environ.get("FOCUS_THEME", "plain")
+    if default_theme not in THEMES:
+        default_theme = "plain"
+
     parser = argparse.ArgumentParser(
         prog="focus",
         description="Name a goal, then count %d minutes down against it." % DEFAULT_MINUTES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="space pauses, q stops early. Sessions are logged to " + LOG_FILE,
+        epilog="themes:\n  " + "\n  ".join(
+            "%-9s %s" % (name, theme.blurb) for name, theme in THEMES.items()
+        ) + "\n\nspace pauses, q stops early. Sessions are logged to " + LOG_FILE,
     )
     parser.add_argument("goal", nargs="*", help="what this block is for")
     parser.add_argument("-m", "--minutes", type=float, default=DEFAULT_MINUTES,
                         help="length of the countdown (default: %d)" % DEFAULT_MINUTES)
+    parser.add_argument("-t", "--theme", choices=sorted(THEMES), default=default_theme,
+                        help="scene behind the clock (default: %s, $FOCUS_THEME)"
+                             % default_theme)
+    parser.add_argument("-p", "--preview", metavar="THEME", choices=sorted(THEMES),
+                        nargs="?", const=default_theme,
+                        help="watch a theme run, logging nothing; q to leave")
     parser.add_argument("-l", "--log", action="store_true",
                         help="show the sessions logged so far and exit")
     parser.add_argument("-n", "--limit", type=int, default=15,
@@ -301,6 +1338,12 @@ def main():
     if args.minutes <= 0:
         parser.error("--minutes must be greater than zero")
 
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+
+    if args.preview:
+        return countdown(" ".join(args.goal).strip() or "theme preview",
+                         args.minutes, args.preview, preview=True)
+
     goal = " ".join(args.goal).strip()
     if not goal:
         try:
@@ -312,8 +1355,7 @@ def main():
         print("A block needs a goal. Nothing started.", file=sys.stderr)
         return 1
 
-    signal.signal(signal.SIGINT, signal.default_int_handler)
-    return countdown(goal, args.minutes)
+    return countdown(goal, args.minutes, args.theme)
 
 
 if __name__ == "__main__":
