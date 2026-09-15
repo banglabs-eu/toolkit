@@ -28,6 +28,8 @@ block takes a random one unless -t or $FOCUS_THEME says otherwise:
     galaxy     a spiral galaxy turning slowly against the field
     jungle     canopy and hanging vines, parrots and butterflies, with a
                monkey swinging past or a snake crossing the undergrowth
+    desert     dunes under a blazing sun, an oasis, a vulture circling, and
+               camel caravans walking the crest
     farm       barn, silo and turning windmill, hens pecking round the
                yard, a cow in the field, a tractor going by
     matrix     glyph rain down every column, bright head, fading tail
@@ -1228,7 +1230,143 @@ def pick(name):
     return name
 
 
-THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galaxy, Jungle, Farm, Matrix, Neurons)}
+
+class Desert(Theme):
+    name = "desert"
+    blurb = "dunes under a blazing sun, an oasis, and camel caravans crossing"
+
+    SAND = rgb(226, 196, 132)
+    SHADE = rgb(190, 156, 100)
+    DEEP = rgb(158, 124, 78)
+    SUN = rgb(255, 214, 92)
+    HAZE = rgb(228, 202, 158)
+    CAMEL = rgb(184, 132, 78)
+    RIDER = rgb(88, 84, 118)
+    PALM = rgb(92, 160, 82)
+    TRUNK = rgb(142, 106, 66)
+    WATER = rgb(95, 175, 205)
+    VULTURE = rgb(74, 68, 74)
+
+    CAMEL_ART = [
+        "          _,",
+        "   /\\_/\\ / o\\",
+        "  /       \\__/",
+        "  |  |  |  |",
+    ]
+    LEGS = ["  |  |  |  |", "  /  |  |  \\"]
+    RIDER_ART = [" o ", "/|\\"]
+    PALM_ART = [" \\\\|//", "  \\|/", "   |", "   |"]
+    SUN_ART = [" \\ | /", "-- O --", " / | \\"]
+    WINGS = [["~^~"], ["~v~"]]
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.dunes, self.shaped = [], 0
+        self.oasis = None
+        self.caravan, self.grains = [], []
+        self.next_caravan = 0.0
+        self.started = None
+
+    def _shape(self, cols, rows):
+        """The dune profile is fixed for a width, so the sand stays put."""
+        if cols == self.shaped:
+            return
+        self.shaped = cols
+        crest = max(2, min(4, rows // 7))
+        self.dunes = [1 + int(crest + math.sin(x * 0.07) * 1.7
+                              + math.sin(x * 0.17 + 2.0) * 1.0) for x in range(cols)]
+        self.oasis = random.randint(4, max(5, cols - 18)) if cols >= 40 else None
+        self.grains = [[random.uniform(0, cols), random.uniform(rows - 9, rows - 5),
+                        random.uniform(5.0, 13.0)] for _ in range(9)]
+
+    def _height(self, x, cols, span=1):
+        """The sand under a footprint — the highest of it, so nothing sinks in."""
+        if not self.dunes:
+            return 2
+        left = min(max(int(x), 0), cols - 1)
+        right = min(max(int(x + span), 0), cols - 1)
+        return max(self.dunes[min(left, right):max(left, right) + 1] or [2])
+
+    def _sand(self, canvas, dt, now, cols, rows):
+        floor = rows - 1
+        for x, height in enumerate(self.dunes[:cols]):
+            top = floor - height + 1
+            canvas.put(x, top, "▒", self.SAND)
+            for y in range(top + 1, floor + 1):
+                canvas.put(x, y, "░", self.SHADE if y < floor - 1 else self.DEEP)
+            shimmer = math.sin(now * 3.0 + x * 0.35)
+            if shimmer > 0.85:                           # heat coming off the crest
+                canvas.put(x, top - 1, "~", self.HAZE)
+        for grain in self.grains:                        # wind off the dunes
+            grain[0] += grain[2] * dt
+            if grain[0] > cols:
+                grain[0], grain[1] = -1.0, random.uniform(rows - 9, rows - 5)
+            canvas.put(grain[0], grain[1], ".", self.HAZE)
+
+    def _oasis(self, canvas, now, cols, rows):
+        if self.oasis is None:
+            return
+        x = self.oasis
+        base = rows - self._height(x, cols)
+        canvas.sprite(x, base - len(self.PALM_ART), self.PALM_ART, self.PALM)
+        canvas.put(x + 3, base - 1, "|", self.TRUNK)
+        canvas.sprite(x + 7, base - 3, [" \\|/", "  |", "  |"], self.PALM)
+        canvas.put(x + 2, base, "~≈~~≈~", self.WATER)
+
+    def _caravan(self, canvas, dt, now, cols, rows):
+        if not self.caravan and now >= self.next_caravan:
+            heading = random.choice((-1, 1))
+            speed = heading * random.uniform(1.8, 3.0)
+            art = self.CAMEL_ART if heading > 0 else mirror(self.CAMEL_ART)
+            span = max(len(row) for row in art)
+            for i in range(random.randint(2, 4)):        # roped nose to tail
+                start = (-span - 2 - i * random.randint(18, 24) if heading > 0
+                         else cols + 2 + i * random.randint(18, 24))
+                camel = Sprite(list(art), self.CAMEL, start, 0, speed,
+                               kind="camel", flip=heading < 0)
+                camel.born = 1.0 if i == 0 else 0.0      # the leader carries a rider
+                self.caravan.append(camel)
+            self.next_caravan = now + random.uniform(35.0, 70.0)
+
+        for camel in list(self.caravan):
+            camel.move(dt)
+            if (camel.vx > 0 and camel.x > cols + 2) or \
+               (camel.vx < 0 and camel.x + camel.width < 0):
+                self.caravan.remove(camel)
+                continue
+            legs = self.LEGS[int(now * 3.5 + camel.x * 0.1) % 2]
+            camel.art[3] = mirror([legs])[0] if camel.flip else legs
+            top = rows - self._height(camel.x, cols, camel.width) - len(camel.art)
+            canvas.sprite(camel.x, top, camel.art, camel.tint)
+            if camel.born:
+                canvas.sprite(camel.x + (3 if not camel.flip else camel.width - 6),
+                              top - 1, self.RIDER_ART, self.RIDER)
+        if self.caravan:
+            self.next_caravan = max(self.next_caravan, now + 20.0)
+
+    def _vulture(self, canvas, now, cols, rows):
+        turn = now * 0.35
+        x = cols * 0.5 + math.cos(turn) * cols * 0.3
+        y = max(0, rows * 0.16) + math.sin(turn) * 2.0
+        canvas.sprite(x, y, self.WINGS[int(now * 4) % 2], self.VULTURE)
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if self.started is None:
+            self.started = now
+            self.next_caravan = now + random.uniform(4.0, 14.0)
+        self._shape(cols, rows)
+        if cols > 30:
+            canvas.sprite(cols - 9, 0, self.SUN_ART, self.SUN)
+        self._sand(canvas, dt, now, cols, rows)
+        self._oasis(canvas, now, cols, rows)
+        self._vulture(canvas, now, cols, rows)
+        self._caravan(canvas, dt, now, cols, rows)
+
+
+THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galaxy, Jungle, Desert, Farm,
+                                  Matrix, Neurons)}
 
 
 def compose(canvas, goal, remaining, total, paused, started_at):

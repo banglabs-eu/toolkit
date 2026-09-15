@@ -429,6 +429,7 @@ Random never draws `plain`. A frame costs between 0.2% and 0.9% of one core.
 | `space` | a twinkling starfield past a ringed planet, rockets under power, satellites blinking, the odd comet |
 | `galaxy` | a spiral galaxy turning slowly, arms of stars wound round a bright core |
 | `jungle` | canopy and hanging vines, parrots and butterflies, a monkey swinging through or a snake crossing the undergrowth |
+| `desert` | dunes under a blazing sun with heat coming off the crest, an oasis, a circling vulture, and roped caravans of two to four camels walking over the sand |
 | `farm` | barn, silo and turning windmill, hens pecking round the yard, a cow in the field, a tractor going by |
 | `matrix` | glyph rain down every column, bright at the head, fading behind |
 | `neurons` | cells wired into a net, pulses running the dendrites and firing the cell at the far end |
@@ -468,6 +469,19 @@ Once a block, and only once, this crosses the tank:
    \__/                           \__
    /        o                         >
   /\______________________________.--/
+```
+
+a caravan crossing the dunes, the leader carrying a rider, the oasis off to the right:
+
+```
+                        /\_/\ /.o\          .   o .
+         .  _,         /       \__/            /|\    _, ..             .
+  .  /\_/\ / o\        |  |  |  |              /\_/\ / o\              .
+    /       \__/         ~~~▒▒▒▒▒▒▒▒          /       \__/ \\|//
+    |  |~~|  |       ▒▒▒▒▒▒▒░░░░░░░░▒▒▒▒▒  ~~ /  |  |  \    \|/   \|/
+▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒░░░░░░░░░░░░░░░░░░░░▒▒▒▒~               |     |
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▒▒▒             |~~   |▒▒▒▒▒▒▒▒
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▒▒▒▒▒▒▒▒▒▒▒▒~≈~~≈~▒░░░░░░░░░
 ```
 
 and the same block at the airport, one departure rolling out, one prop on short final:
