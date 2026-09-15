@@ -22,8 +22,10 @@ dpkg -s rsync          &>/dev/null || PACKAGES+=(rsync)
 # pslag: ffmpeg reads the video, numpy does the arithmetic. Both above.
 # music-index: ffmpeg decodes the audio (above). librosa and mutagen are pip-only,
 # so the tool builds its own venv under ~/.local/share/bpm-scan on first run.
-# focus: standard library only. notify-send and paplay are used for the alarm
-# if present, and skipped without complaint if not.
+# focus: standard library only, network included — it talks to
+# toolkit-api.bang-labs.eu over urllib once you run `focus --login`, and not
+# at all until then. notify-send and paplay are used for the alarm if
+# present, and skipped without complaint if not.
 
 if [[ ${#PACKAGES[@]} -gt 0 ]]; then
     info "Installing missing packages: ${PACKAGES[*]}"

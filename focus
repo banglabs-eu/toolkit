@@ -16,6 +16,8 @@ whether you saw it through — is appended to a log you can read back.
     focus --history yesterday      the same for yesterday, a weekday or a date
     focus --no-finale "quiet"      land the block without the celebration
     focus --me                     set the name and birthday it greets you by
+    focus --login                  keep the history in your Bang Labs account
+    focus --whoami                 which account this machine logs to
 
 Themes draw a scene behind the clock, a frame every tenth of a second. Each
 block takes a random one unless -t or $FOCUS_THEME says otherwise:
@@ -62,7 +64,15 @@ A block that runs to zero ends on six seconds of celebration — fireworks, a
 shockwave or confetti, drawn at random over the theme, with DONE across the
 middle. Any key closes it early, --no-finale skips it.
 
-Everything lands in ~/focus/sessions.csv. --log is the running tail of it;
+Everything lands in ~/focus/sessions.csv, on this machine and nowhere else.
+Run --login once and the record moves to your Bang Labs account instead — the
+same one every bang-labs.eu site uses — so a block started on the laptop is
+there in --history on the desktop. Signed out, focus never touches the
+network; --logout goes back to the CSV. A block that cannot be uploaded when
+it ends waits in ~/focus/pending.jsonl and goes up with the next one, so
+nothing is lost to a dropped connection.
+
+--log is the running tail of the log;
 --history reads a single day back — when each block started and stopped, what
 it was for, how long you were away between them, and the whole day drawn as
 one strip of hours. It takes today, yesterday, a weekday name, a date written
@@ -75,6 +85,7 @@ used for the alarm if they exist.
 
 import argparse
 import csv
+import getpass
 import json
 import math
 import os
@@ -87,6 +98,10 @@ import sys
 import termios
 import time
 import tty
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 from datetime import date, datetime, timedelta
 
 DEFAULT_MINUTES = 25
@@ -96,7 +111,16 @@ FINALES = ("fireworks", "shockwave", "confetti")
 LOG_DIR = os.path.expanduser("~/focus")
 LOG_FILE = os.path.join(LOG_DIR, "sessions.csv")
 PROFILE = os.path.join(LOG_DIR, "profile.json")
+TOKEN_FILE = os.path.join(LOG_DIR, "token")
+PENDING_FILE = os.path.join(LOG_DIR, "pending.jsonl")
 LOG_FIELDS = ["started", "goal", "planned_minutes", "actual_minutes", "completed"]
+
+DEFAULT_API_URL = "https://toolkit-api.bang-labs.eu"
+DEFAULT_ACCOUNTS_URL = "https://accounts.bang-labs.eu"
+TIMEOUT = 10                       # seconds; a block is over, nobody is waiting
+BATCH = 500                        # blocks per upload, so a long history pages
+# Fixed, so the same pre-account block derives the same id on every machine.
+CSV_NAMESPACE = uuid.UUID("c6db9b12-8780-4784-bd5a-6f9677fb3218")
 
 
 def rgb(r, g, b):
@@ -2268,7 +2292,415 @@ def ask_profile(force=False):
 
 
 
-def record(started, goal, planned, actual, completed):
+# --- The account, and where the history lives --------------------------------
+#
+# Signed out, focus is what it has always been: one script, one CSV, no
+# network at all. Signing in moves the record to the toolkit database behind
+# accounts.bang-labs.eu, so a block started on the laptop is there in
+# --history on the desktop. Still nothing outside the standard library.
+
+
+class ApiError(Exception):
+    """Something the user needs to hear about a request, in their words."""
+
+
+def api_url():
+    return os.environ.get("FOCUS_API_URL", DEFAULT_API_URL).rstrip("/")
+
+
+def accounts_url():
+    return os.environ.get("FOCUS_ACCOUNTS_URL", DEFAULT_ACCOUNTS_URL).rstrip("/")
+
+
+def load_token():
+    try:
+        with open(TOKEN_FILE) as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+def save_token(token):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    # A 30-day session for every Bang Labs site, so it is written the way a
+    # private key is: created 0600, not chmod-ed to 0600 a moment later.
+    handle = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(handle, "w") as fh:
+        fh.write(token + "\n")
+
+
+def clear_token():
+    try:
+        os.remove(TOKEN_FILE)
+    except OSError:
+        pass
+
+
+def signed_in():
+    return load_token() is not None
+
+
+def explain(error):
+    """An HTTP failure in the words the service used, when it sent any.
+
+    Every Bang Labs service answers an error with a `detail` — and its
+    wording beats anything invented here. "Too many failed attempts. Try
+    again in 15 minutes." is the whole message; "HTTP 429" is not.
+    """
+    try:
+        detail = json.loads(error.read().decode()).get("detail")
+    except (ValueError, AttributeError, OSError):
+        detail = None
+    if isinstance(detail, list) and detail:        # a FastAPI validation error
+        first = detail[0]
+        detail = first.get("msg") if isinstance(first, dict) else None
+    return str(detail) if detail else "HTTP %s from %s." % (error.code, error.url)
+
+
+def request(method, url, body=None, token=None, timeout=TIMEOUT):
+    """One JSON request. Returns the decoded body, or raises ApiError
+    carrying a sentence worth printing on its own."""
+    host = urllib.parse.urlsplit(url).netloc
+    data = json.dumps(body).encode() if body is not None else None
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = "Bearer " + token
+
+    call = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(call, timeout=timeout) as response:
+            return json.loads(response.read().decode() or "{}")
+    except urllib.error.HTTPError as error:        # a subclass of URLError, so first
+        raise ApiError(explain(error)) from None
+    except urllib.error.URLError as error:
+        raise ApiError("%s is unreachable (%s)." % (host, error.reason)) from None
+    except ValueError:
+        raise ApiError("%s sent something that was not JSON." % host) from None
+    except OSError as error:
+        raise ApiError("%s did not answer (%s)." % (host, error)) from None
+
+
+def api(method, path, body=None, params=None):
+    """A call to the toolkit API, signed with the session on this machine."""
+    token = load_token()
+    if not token:
+        raise ApiError("Not signed in. Run: focus --login")
+    url = api_url() + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    try:
+        return request(method, url, body, token)
+    except ApiError as error:
+        if "session" in str(error).lower():        # expired, invalid, revoked
+            raise ApiError("%s Run: focus --login" % error) from None
+        raise
+
+
+def whoami():
+    """The account this machine is signed in as, or None."""
+    token = load_token()
+    if not token:
+        return None
+    return request("GET", accounts_url() + "/me", token=token).get("username")
+
+
+def device():
+    """Which machine a block was done on, so a day spent across two of them
+    can still be told apart later."""
+    return os.uname().nodename
+
+
+def aware(moment):
+    """The absolute instant a local wall-clock time names.
+
+    astimezone() reads a naive datetime as local time, which is what every
+    time in this script is — the CSV has always written wall clock.
+    """
+    return moment.astimezone()
+
+
+def local(text):
+    """An instant from the API as local wall clock, the way the rest of this
+    script writes and compares time."""
+    moment = datetime.fromisoformat(text)
+    if moment.tzinfo is not None:
+        moment = moment.astimezone().replace(tzinfo=None)
+    return moment
+
+
+def csv_id(row):
+    """A stable id for a block that predates the account.
+
+    The CSV never carried one, so it is derived from the block itself: the
+    same row uploaded twice — from a second machine, or a second run of
+    --upload — comes out as the same uuid, and the server's idempotency does
+    the rest. uuid5 rather than a bare hash, so it is a uuid like the ids
+    every block minted since.
+    """
+    key = "%s|%s|%s" % (row["started"], row["goal"], row["actual_minutes"])
+    return str(uuid.uuid5(CSV_NAMESPACE, key))
+
+
+def as_row(session):
+    """A block from the API in the shape the rest of focus reads: the CSV's.
+
+    Keeping this one conversion at the edge is what lets blocks_on, show_day,
+    strip and the rest stay exactly as they were, local and naive, whichever
+    source the day came from.
+    """
+    return {
+        "started": local(session["started_at"]).isoformat(timespec="seconds"),
+        "goal": session["goal"],
+        "planned_minutes": "%g" % session["planned_minutes"],
+        "actual_minutes": "%.1f" % session["actual_minutes"],
+        "completed": "yes" if session["completed"] else "no",
+    }
+
+
+def as_session(row):
+    """A CSV row in the shape the API takes."""
+    return {
+        "client_id": csv_id(row),
+        "started_at": aware(datetime.fromisoformat(row["started"])).isoformat(),
+        "goal": row["goal"],
+        "planned_minutes": float(row["planned_minutes"]),
+        "actual_minutes": float(row["actual_minutes"]),
+        "completed": row["completed"] == "yes",
+    }
+
+
+def queue(session):
+    """Hold a block that could not be uploaded, so a later run can send it.
+
+    The account is the record once you are signed in, but a block you sat
+    through is not something to lose to a dropped connection on the way to
+    it.
+    """
+    os.makedirs(LOG_DIR, exist_ok=True)
+    with open(PENDING_FILE, "a") as fh:
+        fh.write(json.dumps(session) + "\n")
+
+
+def pending():
+    """Blocks waiting to go up, oldest first."""
+    try:
+        with open(PENDING_FILE) as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def hold(sessions):
+    """Rewrite the queue with what is still waiting."""
+    if not sessions:
+        try:
+            os.remove(PENDING_FILE)
+        except OSError:
+            pass
+        return
+    with open(PENDING_FILE, "w") as fh:
+        for session in sessions:
+            fh.write(json.dumps(session) + "\n")
+
+
+def flush(quiet=True):
+    """Send whatever is waiting, in pages. Returns how many blocks landed."""
+    waiting = pending()
+    if not waiting:
+        return 0
+    sent = 0
+    for start in range(0, len(waiting), BATCH):
+        page = waiting[start:start + BATCH]
+        try:
+            answer = api("POST", "/focus/sessions/import", {"sessions": page})
+        except ApiError as error:
+            # Keep only what has not gone up, so a flush that fails halfway
+            # still made progress instead of resending from the top forever.
+            hold(waiting[start:])
+            if not quiet:
+                print("Could not send %d waiting block%s: %s"
+                      % (len(waiting) - start, "" if len(waiting) - start == 1 else "s",
+                         error), file=sys.stderr)
+            return sent
+        sent += answer["created"]
+    hold([])
+    return sent
+
+
+def upload_csv():
+    """Send ~/focus/sessions.csv — the blocks logged before there was an
+    account to put them in."""
+    rows = local_log()
+    if not rows:
+        print("Nothing in %s to send." % LOG_FILE)
+        return 0
+    sessions = [as_session(row) for row in rows]
+    created = 0
+    for start in range(0, len(sessions), BATCH):
+        try:
+            answer = api("POST", "/focus/sessions/import",
+                         {"sessions": sessions[start:start + BATCH]})
+        except ApiError as error:
+            print(error, file=sys.stderr)
+            return 1
+        created += answer["created"]
+    already = len(sessions) - created
+    print("  Uploaded %d block%s%s."
+          % (created, "" if created == 1 else "s",
+             "" if not already else ", %d already there" % already))
+    return 0
+
+
+def offer_upload():
+    """Ask once, at sign-in, about the history already on this machine.
+
+    Without this the account simply starts empty, and a year of blocks
+    quietly stops showing up in --log — the CSV is not gone, but it is no
+    longer what focus reads.
+    """
+    rows = local_log()
+    if not rows:
+        return 0
+    if not sys.stdin.isatty():
+        return 0
+    try:
+        answer = input("  Upload the %d block%s already logged on this machine? [Y/n] "
+                       % (len(rows), "" if len(rows) == 1 else "s")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        answer = "n"
+    if answer.startswith("n"):
+        print("  Left where they are. focus --upload sends them later.")
+        return 0
+    return upload_csv()
+
+
+def do_login():
+    """Sign in to accounts.bang-labs.eu, and offer to bring this machine's
+    history along."""
+    if signed_in():
+        try:
+            who = whoami()
+        except ApiError:
+            who = None                             # a dead token; sign in over it
+        if who:
+            print("Already signed in as %s. Run focus --logout to change account."
+                  % who)
+            return 0
+
+    print("Sign in with your Bang Labs account — the same one as every other")
+    print("bang-labs.eu site. Register at %s if you have none yet." % accounts_url())
+    try:
+        username = input("  Username: ").strip()
+        password = getpass.getpass("  Password: ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 1
+    if not username or not password:
+        print("Nothing entered. Not signed in.", file=sys.stderr)
+        return 1
+
+    try:
+        answer = request("POST", accounts_url() + "/login",
+                         {"username": username, "password": password,
+                          "service": "focus"})
+    except ApiError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    save_token(answer["token"])
+    print("Signed in as %s. Blocks are kept in your account from now on."
+          % answer["username"])
+    return offer_upload()
+
+
+def do_logout():
+    token = load_token()
+    if not token:
+        print("Not signed in.")
+        return 0
+
+    waiting = len(pending())
+    if waiting:
+        flush(quiet=False)
+    waiting = len(pending())
+    if waiting:
+        print("%d block%s could not be sent, and stay in %s until the next "
+              "sign-in." % (waiting, "" if waiting == 1 else "s", PENDING_FILE),
+              file=sys.stderr)
+
+    try:
+        request("POST", accounts_url() + "/logout", {}, token=token)
+    except ApiError:
+        pass                                       # the token goes either way
+    clear_token()
+    print("Signed out. focus logs to %s again." % LOG_FILE)
+    return 0
+
+
+def do_whoami():
+    if not signed_in():
+        print("Not signed in — blocks are logged to %s." % LOG_FILE)
+        print("Run focus --login to keep them in your Bang Labs account.")
+        return 0
+    try:
+        who = whoami()
+    except ApiError as error:
+        print(error, file=sys.stderr)
+        return 1
+    print("Signed in as %s." % who)
+    print("Blocks are kept at %s." % api_url())
+    waiting = len(pending())
+    if waiting:
+        print("%d block%s waiting to upload. Run: focus --sync"
+              % (waiting, "" if waiting == 1 else "s"))
+    return 0
+
+
+def do_sync():
+    if not signed_in():
+        print("Not signed in. Run: focus --login", file=sys.stderr)
+        return 1
+    waiting = len(pending())
+    if not waiting:
+        print("Nothing waiting.")
+        return 0
+    flush(quiet=False)
+    left = len(pending())
+    print("Sent %d of %d waiting block%s."
+          % (waiting - left, waiting, "" if waiting == 1 else "s"))
+    return 1 if left else 0
+
+
+def record(started, goal, planned, actual, completed, theme=None):
+    """Keep the block: in the account when there is one, in the CSV when
+    there is not, and never nowhere."""
+    if not signed_in():
+        record_locally(started, goal, planned, actual, completed)
+        return
+
+    session = {
+        "client_id": str(uuid.uuid4()),
+        "started_at": aware(started).isoformat(),
+        "goal": goal,
+        "planned_minutes": float(planned),
+        "actual_minutes": round(actual, 1),
+        "completed": completed,
+        "theme": theme,
+        "device": device(),
+    }
+    try:
+        api("POST", "/focus/sessions", session)
+    except ApiError as error:
+        queue(session)
+        print("Kept on this machine for now — %s" % error, file=sys.stderr)
+        return
+    flush()                                        # anything an earlier block left
+
+
+def record_locally(started, goal, planned, actual, completed):
     os.makedirs(LOG_DIR, exist_ok=True)
     new = not os.path.exists(LOG_FILE)
     with open(LOG_FILE, "a", newline="") as fh:
@@ -2354,7 +2786,7 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
         print("Preview of the %s theme — %s" % (theme_name, THEMES[theme_name].blurb))
         return 0
 
-    record(started_at, goal, minutes, actual, completed)
+    record(started_at, goal, minutes, actual, completed, theme_name)
     if completed:
         finished(message, colour, quiet=not (interactive and finale))
     else:
@@ -2362,12 +2794,77 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
     return 0 if completed else 1
 
 
-def read_log():
-    """Every session logged so far, oldest first, or an empty list."""
+def read_log(since=None, until=None, limit=None):
+    """Blocks, oldest first, in the CSV's shape whatever the source.
+
+    Signed in, the account is the record and this asks it; signed out it is
+    ~/focus/sessions.csv, exactly as before. `since` and `until` are local
+    wall-clock datetimes, `until` is exclusive so a day and the next never
+    both claim a block on the boundary, and `limit` takes the most recent N.
+    """
+    if not signed_in():
+        return local_log(since, until, limit)
+
+    params = {}
+    if since is not None:
+        params["since"] = aware(since).isoformat()
+    if until is not None:
+        params["until"] = aware(until).isoformat()
+    if limit is not None:
+        # The API refuses more than a thousand in one go, and a terminal that
+        # wanted to print more than that was not going to be read anyway.
+        params["limit"] = min(limit, 1000)
+    answer = api("GET", "/focus/sessions", params=params)
+    return [as_row(session) for session in answer["sessions"]]
+
+
+def local_log(since=None, until=None, limit=None):
+    """The same read against the CSV, which is already in the order it
+    happened — it has only ever been appended to."""
     if not os.path.exists(LOG_FILE):
         return []
     with open(LOG_FILE, newline="") as fh:
-        return list(csv.DictReader(fh))
+        rows = list(csv.DictReader(fh))
+    if since is not None or until is not None:
+        kept = []
+        for row in rows:
+            started = datetime.fromisoformat(row["started"])
+            if since is not None and started < since:
+                continue
+            if until is not None and started >= until:
+                continue
+            kept.append(row)
+        rows = kept
+    return rows[-limit:] if limit else rows
+
+
+def summary():
+    """Minutes today, minutes over the last seven days, blocks ever.
+
+    The three numbers --log prints above its tail. Both window edges are
+    worked out here, from this machine's clock, because "today" is a local
+    question and the server has no business guessing the answer.
+    """
+    midnight = datetime.combine(date.today(), datetime.min.time())
+    week = midnight - timedelta(days=6)
+    if signed_in():
+        answer = api("GET", "/focus/sessions/summary", params={
+            "day_since": aware(midnight).isoformat(),
+            "week_since": aware(week).isoformat(),
+        })
+        return (answer["today_minutes"], answer["week_minutes"],
+                answer["total_sessions"])
+
+    rows = local_log()
+    today_min = week_min = 0.0
+    for row in rows:
+        started = datetime.fromisoformat(row["started"])
+        minutes = float(row["actual_minutes"])
+        if started >= midnight:
+            today_min += minutes
+        if started >= week:
+            week_min += minutes
+    return today_min, week_min, len(rows)
 
 
 def paint(text, tint, colour=True):
@@ -2518,21 +3015,14 @@ def show_day(rows, day, colour, cols):
 
 def show_history(when):
     """--history: a day at a time, or the last seven days at once."""
-    rows = read_log()
-    if not rows:
-        print("No sessions yet. Run: focus \"your goal\"")
-        return 0
     colour = colours_on()
     cols = shutil.get_terminal_size((80, 24)).columns
     today = date.today()
 
     word = (when or "today").strip().lower()
-    if word in ("week", "7", "7d"):
+    a_week = word in ("week", "7", "7d")
+    if a_week:
         days = [today - timedelta(days=back) for back in range(6, -1, -1)]
-        days = [day for day in days if blocks_on(rows, day)]
-        if not days:
-            print("Nothing logged in the last seven days.")
-            return 0
     else:
         day = parse_when(word)
         if day is None:
@@ -2541,44 +3031,58 @@ def show_history(when):
             return 1
         days = [day]
 
-    total = 0.0
-    for index, day in enumerate(days):
-        if index:
-            print()
-        total += show_day(rows, day, colour, cols)
+    # One read for the whole span however many days it covers: the account is
+    # a network hop away, and seven of them to draw one week would be silly.
+    start = datetime.combine(days[0], datetime.min.time())
+    end = datetime.combine(days[-1] + timedelta(days=1), datetime.min.time())
+    try:
+        rows = read_log(since=start, until=end)
+        if not rows and not summary()[2]:
+            print("No sessions yet. Run: focus \"your goal\"")
+            return 0
 
-    if len(days) > 1:
-        print("\n%s across %d days." % (paint(spell(total), BOLD, colour), len(days)))
-    elif not total:
-        earlier = [datetime.fromisoformat(row["started"]).date() for row in rows]
-        earlier = [seen for seen in earlier if seen < days[0]]
-        if earlier:
-            print("The last block before that was %s."
-                  % max(earlier).strftime("%A %-d %B"))
+        if a_week:
+            days = [day for day in days if blocks_on(rows, day)]
+            if not days:
+                print("Nothing logged in the last seven days.")
+                return 0
+
+        total = 0.0
+        for index, day in enumerate(days):
+            if index:
+                print()
+            total += show_day(rows, day, colour, cols)
+
+        if len(days) > 1:
+            print("\n%s across %d days." % (paint(spell(total), BOLD, colour), len(days)))
+        elif not total:
+            earlier = read_log(until=start, limit=1)
+            if earlier:
+                seen = datetime.fromisoformat(earlier[0]["started"]).date()
+                print("The last block before that was %s."
+                      % seen.strftime("%A %-d %B"))
+    except ApiError as error:
+        print(error, file=sys.stderr)
+        return 1
     return 0
 
 
 def show_log(limit):
-    rows = read_log()
+    try:
+        today_min, week_min, total = summary()
+        rows = read_log(limit=limit)
+    except ApiError as error:
+        print(error, file=sys.stderr)
+        return 1
     if not rows:
         print("No sessions yet. Run: focus \"your goal\"")
         return 0
 
-    today = datetime.now().date()
-    week = today - timedelta(days=6)
-    today_min = week_min = 0.0
-    for row in rows:
-        day = datetime.fromisoformat(row["started"]).date()
-        minutes = float(row["actual_minutes"])
-        if day == today:
-            today_min += minutes
-        if day >= week:
-            week_min += minutes
     print("Today %d min · last 7 days %d min · %d sessions logged\n"
-          % (today_min, week_min, len(rows)))
+          % (today_min, week_min, total))
 
-    goal_width = max(20, min(50, max(len(r["goal"]) for r in rows[-limit:])))
-    for row in rows[-limit:]:
+    goal_width = max(20, min(50, max(len(r["goal"]) for r in rows)))
+    for row in rows:
         when = datetime.fromisoformat(row["started"])
         goal = row["goal"]
         if len(goal) > goal_width:
@@ -2602,7 +3106,8 @@ def main():
         epilog="themes:\n  " + "\n  ".join(
             ["%-9s %s" % (name, theme.blurb) for name, theme in THEMES.items()]
             + ["%-9s %s" % (RANDOM, "one of the above, drawn fresh for each block")]
-        ) + "\n\nspace pauses, q stops early. Sessions are logged to " + LOG_FILE,
+        ) + "\n\nspace pauses, q stops early. Sessions are logged to " + LOG_FILE
+          + ",\nor to your Bang Labs account once you have run focus --login.",
     )
     parser.add_argument("goal", nargs="*", help="what this block is for")
     parser.add_argument("-m", "--minutes", type=float, default=DEFAULT_MINUTES,
@@ -2616,6 +3121,16 @@ def main():
                         help="watch a theme run, logging nothing; q to leave")
     parser.add_argument("--me", action="store_true",
                         help="set the name and birthday focus greets you by")
+    parser.add_argument("--login", action="store_true",
+                        help="sign in, so the history follows you between machines")
+    parser.add_argument("--logout", action="store_true",
+                        help="forget the account on this machine")
+    parser.add_argument("--whoami", action="store_true",
+                        help="which account this machine keeps its blocks in")
+    parser.add_argument("--sync", action="store_true",
+                        help="send blocks that could not be uploaded when they ended")
+    parser.add_argument("--upload", action="store_true",
+                        help="send this machine's ~/focus/sessions.csv to the account")
     parser.add_argument("--no-finale", action="store_true",
                         help="end quietly, without the finish animation")
     parser.add_argument("-l", "--log", action="store_true",
@@ -2626,6 +3141,24 @@ def main():
     parser.add_argument("-n", "--limit", type=int, default=15,
                         help="how many sessions --log prints (default: 15)")
     args = parser.parse_args()
+
+    if args.login:
+        return do_login()
+
+    if args.logout:
+        return do_logout()
+
+    if args.whoami:
+        return do_whoami()
+
+    if args.sync:
+        return do_sync()
+
+    if args.upload:
+        if not signed_in():
+            print("Not signed in. Run: focus --login", file=sys.stderr)
+            return 1
+        return upload_csv()
 
     if args.me:
         ask_profile(force=True)

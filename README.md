@@ -387,6 +387,8 @@ focus --log                    # sessions so far, today's total on top
 focus --history                # what you did today, block by block
 focus --history yesterday      # the same for yesterday
 focus --history 14-9           # or a weekday name, a date, or week
+focus --login                  # keep the history in your Bang Labs account
+focus --whoami                 # which account this machine logs to
 ```
 
 While it runs, `space` pauses and resumes, `q` stops early, and `Ctrl-C` does
@@ -632,6 +634,48 @@ says so, and points at the last one that has something.
 
 It runs on the alternate screen, so whatever was in the terminal comes back
 when the block ends. Python 3 standard library only, no root.
+
+#### The account
+
+Out of the box `focus` is a single script writing a single CSV, and it never
+touches the network. `focus --login` changes where the record lives: sign in
+with your Bang Labs account — the same one as every other `bang-labs.eu` site
+— and blocks go to the toolkit database instead, so one started on the laptop
+is there in `focus --history` on the desktop.
+
+```
+focus --login
+  Username: adam
+  Password:
+Signed in as adam. Blocks are kept in your account from now on.
+  Upload the 214 blocks already logged on this machine? [Y/n] y
+  Uploaded 214 blocks.
+```
+
+Signing in offers to bring the CSV with you, so nothing disappears from
+`--log` the moment the account takes over. Saying no leaves it alone;
+`focus --upload` sends it later. Either way it is safe to repeat — a block
+carries an id derived from itself, so uploading the same CSV from a second
+machine adds nothing the account already has.
+
+A block that cannot be uploaded when it ends is not lost. It says so, waits in
+`~/focus/pending.jsonl`, and goes up with the next one that succeeds, or when
+you run `focus --sync`:
+
+```
+Kept on this machine for now — toolkit-api.bang-labs.eu is unreachable.
+✓ 25 minutes done — rewrite the intro — 09:40
+```
+
+Reading is the other way round: `--log` and `--history` come from the account
+once you are signed in, and say plainly when they cannot reach it rather than
+quietly showing you a stale local file. `focus --logout` goes back to the CSV,
+flushing anything still waiting on the way out.
+
+Everything here is still standard library — `urllib`, not `requests`. The
+service on the other end is [`toolkit-api`](../toolkit-api); the account is
+`accounts.bang-labs.eu`. `FOCUS_API_URL` and `FOCUS_ACCOUNTS_URL` point either
+somewhere else for local work.
 
 ### backup
 
