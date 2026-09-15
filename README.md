@@ -421,6 +421,34 @@ second. `-t` picks one instead, and `$FOCUS_THEME` changes what the default is �
 set it to `plain` for a bare clock, or to a theme name to stop the lottery.
 Random never draws `plain`. A frame costs between 0.2% and 0.9% of one core.
 
+`haunted` keeps to its season: random only offers it during the Monday-to-Sunday
+week that holds 31 October, and then it comes up about a quarter of the time.
+`-t haunted` runs it any day of the year.
+
+```
+                                                              .--.     /
+                                                             (    .)--|
+                                                                 (  ° |)
+                                                                  '---|    .
+                               .--.                                   \   (
+                            ship the theme work                        \
+                               )~~(                                   \^/
+                     ██████  ██  ██      ██  ██  ██████                \
+                         ██  ██  ██  ██  ██  ██  ██                     |
+                     ██████  ██████      ██████  ██████                 |
+                     ██          ██  ██      ██      ██                 \
+  /^\                ██████      ██          ██  ██████                  |
+                            /\                                           /
+                ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                        __/    \__________
+               25 min · started 21:00 · space pause · q stop
+                      /_____________________\
+       \  |  /        | ██          ██      |
+        \_|_/         |         ____        |
+          |           |        |·   |       |     ___
+ ~~~   ~~~|           |________|___(^^)_____|~~  |RIP|~~~      ~~~     ~~~
+```
+
 | Theme | What moves |
 |-------|-----------|
 | `plain` | nothing — the default: goal, clock, bar |
@@ -433,6 +461,7 @@ Random never draws `plain`. A frame costs between 0.2% and 0.9% of one core.
 | `farm` | barn, silo and turning windmill, hens pecking round the yard, a cow in the field, a tractor going by |
 | `matrix` | glyph rain down every column, bright at the head, fading behind |
 | `neurons` | cells wired into a net, pulses running the dendrites and firing the cell at the far end |
+| `haunted` | a house on the hill, candles guttering behind its windows, bats crossing the moon, a ghost off the roof, lightning, fog in the yard — **Halloween week only** |
 | `random` | one of the eight scenes, drawn fresh for each block — the default |
 
 An afternoon in the tank — the volcano venting, a crab on the floor:

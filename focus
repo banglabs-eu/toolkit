@@ -35,6 +35,10 @@ block takes a random one unless -t or $FOCUS_THEME says otherwise:
     matrix     glyph rain down every column, bright head, fading tail
     neurons    cells wired into a net, pulses running the dendrites and
                firing the cell at the far end
+    haunted    a house on the hill with candles guttering behind its windows,
+               bats, a ghost off the roof, lightning. Random only offers this
+               one during the Monday-to-Sunday week that holds 31 October;
+               -t haunted runs it whenever you like
 
 `-t plain` is the way back to a bare clock; random never picks it.
 
@@ -61,7 +65,7 @@ import sys
 import termios
 import time
 import tty
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 DEFAULT_MINUTES = 25
 FRAME = 0.1                        # seconds between redraws, so scenes animate
@@ -1220,14 +1224,180 @@ class Galaxy(Theme):
                       [" ·*· ", "*(@)*", " ·*· "], self.CORE, opaque=True)
 
 
+
+class Haunted(Theme):
+    name = "haunted"
+    blurb = "a house on the hill, bats, a ghost and lightning (Halloween week)"
+
+    MOON = rgb(238, 236, 214)
+    CLOUD = rgb(78, 76, 98)
+    WALL = rgb(62, 56, 78)
+    ROOF = rgb(44, 40, 58)
+    LIT = rgb(255, 178, 58)
+    DARK = rgb(38, 34, 48)
+    BAT = rgb(96, 86, 110)
+    GHOST = rgb(205, 218, 238)
+    PUMPKIN = rgb(246, 138, 40)
+    TREE = rgb(74, 62, 62)
+    STONE = rgb(122, 120, 134)
+    FOG = rgb(84, 82, 100)
+    BOLT = rgb(255, 255, 235)
+
+    HOUSE = [
+        "         /\\",
+        "        /  \\",
+        "     __/    \\__________",
+        "    /                   \\",
+        "   /_____________________\\",
+        "   |                     |",
+        "   |         ____        |",
+        "   |        |    |       |",
+        "   |________|____|_______|",
+    ]
+    WINDOWS = ((5, 5), (17, 5), (9, 3))      # offsets into the house
+    MOON_ART = [" .---.", "(  °  )", " '---'"]
+    TREE_ART = ["\\  |  /", " \\_|_/", "   |", "   |"]
+    GRAVE = [" ___ ", "|RIP|"]
+    BATS = [["\\^/"], ["/^\\"]]
+    GHOST_ART = [" .--.", "( .. )", " )~~("]
+
+    def __init__(self):
+        Theme.__init__(self)
+        self.bats, self.ghost = [], None
+        self.clouds = []
+        self.next_bat = 0.0
+        self.next_ghost = 0.0
+        self.next_bolt = 0.0
+        self.flash = 0.0
+        self.bolt = []
+        self.site, self.built = None, 0
+        self.started = None
+
+    def _build(self, cols, rows):
+        if cols == self.built:
+            return
+        self.built = cols
+        self.site = max(2, int(cols * 0.42) - 12) if cols >= 34 and rows >= 15 else None
+        self.clouds = [Sprite([" .--.", "(     )"], self.CLOUD,
+                              random.randrange(cols), random.randint(0, max(0, rows // 4)),
+                              random.uniform(0.4, 1.0)) for _ in range(2)]
+
+    def _sky(self, canvas, dt, now, cols, rows):
+        canvas.sprite(cols - 11, 1, self.MOON_ART, self.MOON, opaque=True)
+        if now >= self.next_bat and len(self.bats) < 4:
+            heading = random.choice((-1, 1))
+            self.bats.append(Sprite(self.BATS[0], self.BAT,
+                                    -4 if heading > 0 else cols + 2,
+                                    random.randint(1, max(1, rows // 2)),
+                                    heading * random.uniform(7.0, 14.0)))
+            self.next_bat = now + random.uniform(2.0, 6.0)
+        for bat in self.bats:                          # they never fly straight
+            bat.art = self.BATS[int(now * 8 + bat.y) % 2]
+            bat.vy = math.sin(now * 2.6 + bat.x * 0.2) * 3.0
+        self.advance(canvas, self.bats, dt, cols, rows)
+        for cloud in self.clouds:
+            cloud.move(dt)
+            if cloud.x > cols:
+                cloud.x = -8.0
+            canvas.sprite(cloud.x, cloud.y, cloud.art, cloud.tint)
+
+    def _ground(self, canvas, now, cols, rows):
+        if self.site is None:
+            return
+        x = self.site
+        top = rows - len(self.HOUSE)
+        bright = now < self.flash
+        for gx in range(0, cols, 9):                   # fog rolling along the ground
+            canvas.put(gx + int(math.sin(now * 0.6 + gx) * 3), rows - 1, "~~~", self.FOG)
+        canvas.sprite(x, top, self.HOUSE[:5], self.BOLT if bright else self.ROOF, opaque=True)
+        canvas.sprite(x, top + 5, self.HOUSE[5:], self.BOLT if bright else self.WALL,
+                      opaque=True)
+        for i, (dx, dy) in enumerate(self.WINDOWS):    # candles guttering inside
+            flicker = math.sin(now * (3.1 + i) + i * 2.0) + math.sin(now * 7.3 + i)
+            canvas.put(x + dx, top + dy, "██",
+                       self.LIT if flicker > -0.4 else self.DARK)
+        canvas.put(x + 13, top + 7, "·", self.LIT)     # the door handle
+
+        pumpkin = x + 16
+        canvas.put(pumpkin, rows - 1, "(^^)" if int(now * 3) % 4 else "(oo)", self.PUMPKIN)
+        canvas.sprite(max(0, x - 12), rows - len(self.TREE_ART), self.TREE_ART,
+                      self.BOLT if bright else self.TREE)
+        for i, spot in enumerate((x - 20, x + 30)):
+            if 0 <= spot < cols - 5:
+                canvas.sprite(spot, rows - 2, self.GRAVE, self.STONE)
+
+    def _ghost(self, canvas, dt, now, cols, rows):
+        if self.ghost is None:
+            if now < self.next_ghost:
+                return
+            # It comes off the roof, not out of the middle of the walls.
+            start = self.site + 8 if self.site is not None else cols // 2
+            roof = rows - len(self.HOUSE) - 3 if self.site is not None else rows - 6
+            self.ghost = Sprite(self.GHOST_ART, self.GHOST, start, roof,
+                                0.0, -random.uniform(1.0, 1.8), kind="ghost")
+            self.ghost.born = now
+        ghost = self.ghost
+        ghost.vx = math.sin((now - ghost.born) * 1.4) * 4.0
+        ghost.move(dt)
+        age = now - ghost.born
+        if ghost.y + len(ghost.art) < 0 or age > 24.0:
+            self.ghost = None
+            self.next_ghost = now + random.uniform(30.0, 75.0)
+            return
+        canvas.sprite(ghost.x, ghost.y, ghost.art,
+                      self.GHOST if age < 6.0 else DIM + self.GHOST)
+
+    def _lightning(self, canvas, now, cols, rows):
+        if now >= self.next_bolt:
+            self.flash = now + random.uniform(0.08, 0.2)
+            self.next_bolt = now + random.uniform(25.0, 70.0)
+            x = random.randrange(max(1, cols - 2))
+            self.bolt, y = [], 0
+            while y < rows * 0.6:                      # a jagged line out of the cloud
+                step = random.choice((-1, 0, 1))
+                self.bolt.append((x, y, "\\" if step > 0 else "/" if step < 0 else "|"))
+                x, y = x + step, y + 1
+        if now < self.flash:
+            for x, y, char in self.bolt:
+                canvas.put(x, y, char, self.BOLT)
+
+    def draw(self, canvas, now):
+        dt = self.tick(now)
+        cols, rows = canvas.cols, canvas.rows
+        if self.started is None:
+            self.started = now
+            self.next_ghost = now + random.uniform(8.0, 30.0)
+            self.next_bolt = now + random.uniform(10.0, 40.0)
+        self._build(cols, rows)
+        self._sky(canvas, dt, now, cols, rows)
+        self._ground(canvas, now, cols, rows)
+        self._ghost(canvas, dt, now, cols, rows)
+        self._lightning(canvas, now, cols, rows)
+
+
 RANDOM = "random"                  # a different scene every block
 
 
+def halloween_week(today=None):
+    """The Monday-to-Sunday week that holds the 31st of October."""
+    today = today or datetime.now().date()
+    eve = date(today.year, 10, 31)
+    monday = eve - timedelta(days=eve.weekday())
+    return monday <= today <= monday + timedelta(days=6)
+
+
 def pick(name):
-    """Resolve a theme name, drawing a scene at random when asked to."""
-    if name == RANDOM:
-        return random.choice([n for n in THEMES if n != Theme.name])
-    return name
+    """Resolve a theme name, drawing a scene at random when asked to.
+
+    The haunted house keeps to its week. Ask for it by name any time you like,
+    but it only turns up unbidden while Halloween is in the same week.
+    """
+    if name != RANDOM:
+        return name
+    pool = [n for n in THEMES if n not in (Theme.name, Haunted.name)]
+    if halloween_week():
+        pool += [Haunted.name] * 3
+    return random.choice(pool)
 
 
 
@@ -1366,7 +1536,7 @@ class Desert(Theme):
 
 
 THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galaxy, Jungle, Desert, Farm,
-                                  Matrix, Neurons)}
+                                  Matrix, Neurons, Haunted)}
 
 
 def compose(canvas, goal, remaining, total, paused, started_at):
