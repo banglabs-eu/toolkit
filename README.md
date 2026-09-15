@@ -391,6 +391,29 @@ the same. The clock turns amber in the last minute. When it reaches zero the
 terminal bell rings, a desktop notification fires (`notify-send`) and a chime
 plays (`paplay`), each skipped quietly if not installed.
 
+#### Landing it
+
+A block that reaches zero does not just stop. The screen gives you six seconds
+of fireworks, a shockwave or confetti — drawn at random, over whatever theme
+was running — with `DONE` across the middle and what the block was for beneath
+it. Any key closes it early; `--no-finale` skips it for good.
+
+```
+        +   ·+   +   +   * * *    *   *        ·
+                 +     *  + ·   .
+             +      *             *   *      ·
+          +   .             +**     *   .             . ·
+          ·  +         *           *         **  *
+    .     +     ██████      ████    ██    ██  ████████       .
+                ██    ██  ██    ██  ████  ██  ██
+         .  +   ██    ██  ██    ██  ██  ████  ██████
+                ██    ██  ██    ██  ██    ██  ██
+    .           ██████      ████    ██    ██  ████████        .
+    .                 . .                             ·
+                      25 minutes · ship the theme work
+            .                 any key to close  ·
+```
+
 #### Themes
 
 Every block draws a random scene behind the clock, a frame every tenth of a
@@ -401,7 +424,7 @@ Random never draws `plain`. A frame costs between 0.2% and 0.9% of one core.
 | Theme | What moves |
 |-------|-----------|
 | `plain` | nothing — the default: goal, clock, bar |
-| `aquarium` | fish crossing the tank, seaweed swaying on the floor, bubbles rising, and once in a while a crab scuttling past or a squid jetting up |
+| `aquarium` | fish crossing the tank, seaweed swaying, bubbles rising, a volcano venting on the floor that erupts every couple of minutes, a crab or a squid now and then, and exactly one blue whale per block |
 | `airport` | terminal and control tower along the bottom, departures rolling out and climbing away, arrivals descending onto the runway, helicopters settling on the apron and lifting off again, tugs, clouds |
 | `space` | a twinkling starfield past a ringed planet, rockets under power, satellites blinking, the odd comet |
 | `galaxy` | a spiral galaxy turning slowly, arms of stars wound round a bright core |
@@ -411,29 +434,40 @@ Random never draws `plain`. A frame costs between 0.2% and 0.9% of one core.
 | `neurons` | cells wired into a net, pulses running the dendrites and firing the cell at the far end |
 | `random` | one of the eight scenes, drawn fresh for each block — the default |
 
-An afternoon in the tank, crab included:
+An afternoon in the tank — the volcano venting, a crab on the floor:
 
 ```
-                   <*{{{><
-
-
-                            ship the theme work
-
-                     ██████  ██  ██      ██  ██  ██████
-                         ██  ██  ██  ██  ██  ██  ██
-                ><<<>██████  ██████      ██████  ██████        o
-                     ██          ██  ██      ██      ██
+   /\   .     °
+<°)))><     °  .                                               .
+   \/     .  °                                           o
+                                              <>>><
+  . /\   .  ° °  .          ship the theme work
+ <°)))><    ° °
+    \/        o      ██████  ██  ██      ██  ██    ██
+                         ██  ██  ██  ██  ██  ██  ████
+            o        ██████  ██████      ██████    ██
+             o       ██          ██  ██      ██    ██
                      ██████      ██          ██  ██████
-      )       (                                                     ) o
-    O  )      ( ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━        )
-       )      (                )           )       )                )
-       )       25 min · started 09:30 · space pause · q stop       )
-      )        )                )          )        )           )  (
-      )        )                )          )        )           )  (
-      (        )               )          )    o    )   )      )   (     )
-      (        )               )          (        )     )     (   (     )
-      (       )                (          (        (     )     (   (     )
-.            .   ,        .       ,    .       (/\)o,,o(/\)      .  ,
+              o                                              (
+ ><(((°>     °* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ (     O      )
+             *°                  )                           (            (
+             * 25 min · started 09:30 · space pause · q stop (            (
+             *                   )  (                 ) )    )            (
+            .°°      )          )   (                 ) (     )           (
+                     )          )   (                )  (     )           (
+            /\^/\     )         (   (                (  (     )           (
+           /     \    )         (   (                (  (    )            )
+.         /_______\       .       ,    .           ,.        (\/)o,,o(\/)
+```
+
+Once a block, and only once, this crosses the tank:
+
+```
+                     /\
+  \/   ____________/  \___________
+   \__/                           \__
+   /        o                         >
+  /\______________________________.--/
 ```
 
 and the same block at the airport, one departure rolling out, one prop on short final:

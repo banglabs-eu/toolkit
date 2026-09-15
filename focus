@@ -12,6 +12,7 @@ whether you saw it through — is appended to a log you can read back.
     focus -t aquarium "read"       pick the scene instead of taking pot luck
     focus --preview airport        watch a theme without starting a block
     focus --log                    the sessions so far, today's total on top
+    focus --no-finale "quiet"      land the block without the celebration
 
 Themes draw a scene behind the clock, a frame every tenth of a second. Each
 block takes a random one unless -t or $FOCUS_THEME says otherwise:
@@ -37,6 +38,10 @@ block takes a random one unless -t or $FOCUS_THEME says otherwise:
 
 While it runs:  space pauses and resumes, q stops early, Ctrl-C does the same.
 
+A block that runs to zero ends on six seconds of celebration — fireworks, a
+shockwave or confetti, drawn at random over the theme, with DONE across the
+middle. Any key closes it early, --no-finale skips it.
+
 Everything lands in ~/focus/sessions.csv. Nothing outside the standard library
 is needed; notify-send and paplay are used for the alarm if they exist.
 """
@@ -58,6 +63,8 @@ from datetime import datetime, timedelta
 
 DEFAULT_MINUTES = 25
 FRAME = 0.1                        # seconds between redraws, so scenes animate
+FINALE = 6.0                       # seconds of celebration when a block lands
+FINALES = ("fireworks", "shockwave", "confetti")
 LOG_DIR = os.path.expanduser("~/focus")
 LOG_FILE = os.path.join(LOG_DIR, "sessions.csv")
 LOG_FIELDS = ["started", "goal", "planned_minutes", "actual_minutes", "completed"]
@@ -88,6 +95,11 @@ GLYPHS = {
     "8": ("111", "101", "111", "101", "111"),
     "9": ("111", "101", "111", "001", "111"),
     ":": ("0", "1", "0", "1", "0"),
+    # Letters are four wide: three cannot hold a diagonal, so N came out solid.
+    "D": ("1110", "1001", "1001", "1001", "1110"),
+    "O": ("0110", "1001", "1001", "1001", "0110"),
+    "N": ("1001", "1101", "1011", "1001", "1001"),
+    "E": ("1111", "1000", "1110", "1000", "1111"),
 }
 GLYPH_ROWS = 5
 
@@ -222,6 +234,7 @@ class Theme:
 
     def __init__(self):
         self.last = None
+        self.total = 1500.0            # length of the block, set by countdown()
 
     def tick(self, now):
         """Seconds since the previous frame, clamped so a stall cannot jump."""
@@ -249,7 +262,8 @@ class Theme:
 
 class Aquarium(Theme):
     name = "aquarium"
-    blurb = "fish, swaying seaweed, and the occasional crab or squid"
+    blurb = ("fish, seaweed and a smoking volcano, with a crab or a squid now "
+             "and then and one blue whale a block")
 
     SAND = rgb(125, 105, 75)
     WEED = rgb(40, 150, 95)
@@ -264,6 +278,20 @@ class Aquarium(Theme):
         (["><}}}*>"], rgb(205, 125, 205)),
         (["<>>><"], rgb(150, 180, 240)),
     ]
+    ROCK = rgb(92, 80, 86)
+    EMBER = rgb(200, 95, 55)
+    LAVA = rgb(252, 180, 70)
+    ASH = rgb(105, 105, 122)
+    WHALE_BLUE = rgb(80, 120, 205)
+
+    VOLCANO = ["  /\\_/\\", " /     \\", "/_______\\"]
+    WHALE = [
+        "                     /\\",
+        "  \\/   ____________/  \\___________",
+        "   \\__/                           \\__",
+        "   /        o                         >",
+        "  /\\______________________________.--/",
+    ]
     CRAB_FRAMES = [["(\\/)o,,o(\\/)"], ["(/\\)o,,o(/\\)"]]
     SQUID_FRAMES = [[" .--.", "(o  o)", " ;||;"], [" .--.", "(o  o)", " ;)(;"]]
 
@@ -275,6 +303,11 @@ class Aquarium(Theme):
         self.next_fish = 0.0
         self.next_bubble = 0.0
         self.next_visitor = 25.0
+        self.cone, self.vent = None, []
+        self.next_puff = 0.0
+        self.next_eruption = 0.0
+        self.erupting = 0.0
+        self.whale, self.whale_at = None, None
         self.started = None
 
     # --- the tank itself ---
@@ -284,8 +317,11 @@ class Aquarium(Theme):
         if cols == self.weed_cols:
             return
         self.weed_cols = cols
+        self.cone = random.choice((cols // 7, cols - cols // 4)) if cols >= 26 else None
         self.weeds = []
         for x in range(1, cols - 1, 5):
+            if self.cone is not None and self.cone - 2 <= x <= self.cone + 10:
+                continue                             # nothing grows on the volcano
             if random.random() < 0.55:
                 self.weeds.append((x + random.randint(0, 3),
                                    random.randint(3, max(4, min(9, floor - 4))),
@@ -380,11 +416,80 @@ class Aquarium(Theme):
             self.visitor = None
             self.next_visitor = now + random.uniform(45.0, 100.0)
 
+    def _volcano(self, canvas, dt, now, rows):
+        """It smokes all block, and lets go properly every couple of minutes."""
+        if self.cone is None:
+            return
+        x, floor = self.cone, rows - 1
+        if now >= self.next_eruption:
+            self.erupting = now + random.uniform(4.0, 8.0)
+            self.next_eruption = self.erupting + random.uniform(70.0, 150.0)
+        blowing = now < self.erupting
+
+        if now >= self.next_puff:
+            hot = blowing and random.random() < 0.8
+            mote = Sprite(["*"], self.LAVA, x + 4, floor - 3, random.uniform(-0.7, 0.7),
+                          -random.uniform(4.0, 7.0) if hot else -random.uniform(1.4, 2.6),
+                          kind="lava" if hot else "ash")
+            mote.born = now
+            self.vent.append(mote)
+            self.next_puff = now + (random.uniform(0.03, 0.1) if blowing
+                                    else random.uniform(0.5, 1.5))
+        for mote in list(self.vent):
+            mote.move(dt)
+            age = now - mote.born
+            if mote.y < 0 or age > 14.0:
+                self.vent.remove(mote)
+                continue
+            if mote.kind == "lava" and age < 0.7:     # thrown out glowing, then cooling
+                char, tint = "*", self.LAVA
+            elif mote.kind == "lava" and age < 1.8:
+                char, tint = "o", self.EMBER
+            else:
+                char, tint = ("." if age > 4.0 else "°"), self.ASH
+            canvas.put(mote.x, mote.y, char, tint)
+
+        canvas.sprite(x, floor - 2, self.VOLCANO, self.ROCK, opaque=True)
+        canvas.put(x + 4, floor - 2, "^" if blowing else "_",
+                   self.LAVA if blowing else
+                   self.EMBER if math.sin(now * 2.2) > 0 else self.ROCK)
+
+    def _whale(self, canvas, dt, now, cols, rows):
+        """One crossing per block, somewhere in the middle of it."""
+        if self.whale is None:
+            if self.whale_at is None or now < self.whale_at or cols < 30 or rows < 10:
+                return
+            self.whale_at = None                      # and never a second time
+            heading = random.choice((-1, 1))
+            art = self.WHALE if heading > 0 else mirror(self.WHALE)
+            span = max(len(row) for row in art)
+            self.whale = Sprite(art, self.WHALE_BLUE,
+                                -span - 2 if heading > 0 else cols + 2,
+                                random.randint(1, max(1, rows - len(art) - 3)),
+                                heading * random.uniform(2.5, 4.0))
+            self.whale.born = now
+
+        whale = self.whale
+        whale.move(dt)
+        if (whale.vx > 0 and whale.x > cols + 2) or (whale.vx < 0 and whale.x + whale.width < 0):
+            self.whale = None
+            return
+        canvas.sprite(whale.x, whale.y, whale.art, whale.tint)
+        if random.random() < 0.15:                    # a breath from the blowhole
+            blow = whale.x + (21 if whale.vx > 0 else whale.width - 22)
+            self.bubbles.append(Sprite(["."], self.BUBBLE, blow, whale.y,
+                                       random.uniform(-0.3, 0.3),
+                                       -random.uniform(2.0, 3.5)))
+
     def draw(self, canvas, now):
         dt = self.tick(now)
         if self.started is None:
             self.started = now
             self.next_visitor = now + random.uniform(20.0, 50.0)
+            self.next_eruption = now + random.uniform(15.0, 60.0)
+            span = max(20.0, self.total)
+            self.whale_at = now + (random.uniform(5.0, 20.0) if span < 60.0
+                                   else random.uniform(0.15, 0.7) * span)
             for _ in range(4):
                 self._spawn_fish(canvas.cols, canvas.rows, anywhere=True)
         cols, rows, floor = canvas.cols, canvas.rows, canvas.rows - 1
@@ -394,6 +499,8 @@ class Aquarium(Theme):
         self._bubbles(canvas, dt, now, cols, rows)
         self._fish(canvas, dt, now, cols, rows)
         self._visitor(canvas, dt, now, cols, rows)
+        self._whale(canvas, dt, now, cols, rows)
+        self._volcano(canvas, dt, now, rows)
 
 
 class Airport(Theme):
@@ -1173,7 +1280,142 @@ def frame(canvas):
     sys.stdout.flush()
 
 
-def alarm(goal, minutes, colour):
+SPARKS = [rgb(255, 215, 95), rgb(255, 125, 90), rgb(120, 220, 255),
+          rgb(195, 145, 255), rgb(140, 250, 150), rgb(255, 255, 255)]
+
+
+class Finale:
+    """The last seconds of a block: loud enough to see from across the room."""
+
+    def __init__(self, style):
+        self.style = style
+        self.rockets, self.sparks, self.rings, self.bits = [], [], [], []
+        self.next_rocket = self.next_ring = 0.0
+        self.last = None
+
+    def _burst(self, x, y, now, tint):
+        for i in range(30):
+            angle = i / 30 * math.tau + random.uniform(-0.06, 0.06)
+            speed = random.uniform(5.0, 13.0)
+            self.sparks.append([x, y, math.cos(angle) * speed * 2.0,
+                                math.sin(angle) * speed, now, tint])
+
+    def _fireworks(self, canvas, dt, now, t, cols, rows):
+        if t < FINALE - 2.0 and now >= self.next_rocket:
+            self.rockets.append([random.uniform(cols * 0.08, cols * 0.92), float(rows - 1),
+                                 -random.uniform(13.0, 19.0),
+                                 random.uniform(1.0, rows * 0.45),
+                                 random.choice(SPARKS)])
+            self.next_rocket = now + random.uniform(0.18, 0.5)
+        for rocket in list(self.rockets):
+            rocket[1] += rocket[2] * dt
+            if rocket[1] <= rocket[3]:                   # apogee, and it lets go
+                self._burst(rocket[0], rocket[1], now, rocket[4])
+                self.rockets.remove(rocket)
+                continue
+            canvas.put(rocket[0], rocket[1], "|", rocket[4])
+            canvas.put(rocket[0], rocket[1] + 1, ".", DIM + rocket[4])
+
+        for spark in list(self.sparks):
+            age = now - spark[4]
+            if age > 1.9:
+                self.sparks.remove(spark)
+                continue
+            spark[0] += spark[2] * dt
+            spark[1] += spark[3] * dt
+            spark[3] += 11.0 * dt                        # they fall as they fade
+            spark[2] *= 0.985
+            canvas.put(spark[0], spark[1],
+                       "*" if age < 0.3 else "+" if age < 0.7 else
+                       "·" if age < 1.2 else ".",
+                       spark[5] if age < 1.0 else DIM + spark[5])
+
+    def _shockwave(self, canvas, dt, now, t, cols, rows):
+        if now >= self.next_ring and t < FINALE - 1.2:
+            self.rings.append([now, random.choice(SPARKS)])
+            self.next_ring = now + 0.5
+        cx, cy = cols / 2.0, rows / 2.0
+        for ring in list(self.rings):
+            age = now - ring[0]
+            radius = age * 15.0
+            if radius * 2 > cols + 10:
+                self.rings.remove(ring)
+                continue
+            char = "O" if age < 0.25 else "o" if age < 0.6 else "·" if age < 1.1 else "."
+            for i in range(max(16, int(radius * 7))):
+                angle = i / max(16, int(radius * 7)) * math.tau
+                canvas.put(cx + math.cos(angle) * radius * 2.0,
+                           cy + math.sin(angle) * radius, char,
+                           ring[1] if age < 0.8 else DIM + ring[1])
+
+    def _confetti(self, canvas, dt, now, t, cols, rows):
+        while len(self.bits) < cols * 2 and t < FINALE - 1.5:
+            self.bits.append([random.uniform(0, cols), random.uniform(-rows, 0),
+                              random.uniform(-1.5, 1.5), random.uniform(6.0, 15.0),
+                              random.choice(SPARKS), random.uniform(0, 6.3)])
+        for bit in self.bits:
+            bit[0] += (bit[2] + math.sin(now * 4.0 + bit[5]) * 2.0) * dt
+            bit[1] += bit[3] * dt
+            if bit[1] > rows:                            # round again, until it stops
+                bit[1], bit[0] = -1.0, random.uniform(0, cols)
+            canvas.put(bit[0], bit[1], "/\\|-o*v"[int(bit[5] * 7) % 7], bit[4])
+
+    def draw(self, canvas, now, t):
+        dt = 0.0 if self.last is None else min(0.25, now - self.last)
+        self.last = now
+        painter = {"fireworks": self._fireworks, "shockwave": self._shockwave}.get(
+            self.style, self._confetti)
+        painter(canvas, dt, now, t, canvas.cols, canvas.rows)
+
+
+def banner(canvas, goal, minutes, now):
+    """DONE across the middle, with what it was for underneath."""
+    cols, rows = canvas.cols, canvas.rows
+    flash = GREEN if math.sin(now * 7.0) > 0 else rgb(205, 255, 215)
+    word = big("DONE")
+    if len(word[0]) > cols - 2:
+        word = ["DONE"]
+    caption = "%g minutes · %s" % (minutes, goal)
+    if len(caption) > cols - 4:
+        caption = caption[: cols - 5] + "…"
+
+    lines = [[(row, BOLD + flash)] for row in word]
+    lines += [[], [(" " + caption + " ", BOLD)], [("any key to close", DIM)]]
+    top = max(0, (rows - len(lines)) // 2)
+    for i, segments in enumerate(lines):
+        x = max(0, (cols - sum(len(text) for text, _ in segments)) // 2)
+        for text, tint in segments:
+            canvas.put(x, top + i, text, tint, opaque=True)
+            x += len(text)
+
+
+def celebrate(theme, goal, minutes, colour):
+    """Run the finish animation until it is done or a key says enough."""
+    show = Finale(random.choice(FINALES))
+    start = time.monotonic()
+    rung = 0
+    while True:
+        now = time.monotonic()
+        elapsed = now - start
+        if elapsed >= FINALE:
+            return
+        if rung < 3 and elapsed >= rung * 0.5:
+            rung += 1
+            sys.stdout.write("\a")
+        cols, rows = shutil.get_terminal_size((80, 24))
+        canvas = Canvas(max(20, cols), max(8, rows), colour)
+        theme.draw(canvas, now)
+        show.draw(canvas, now, elapsed)
+        banner(canvas, goal, minutes, now)
+        frame(canvas)
+        ready, _, _ = select.select([sys.stdin], [], [], FRAME)
+        if ready:
+            sys.stdin.read(1)
+            return
+
+
+def alarm(goal, minutes):
+    """Notification and chime — the half of it that reaches another room."""
     message = "%g minutes done — %s" % (minutes, goal)
     if shutil.which("notify-send"):
         subprocess.run(
@@ -1187,10 +1429,15 @@ def alarm(goal, minutes, colour):
         subprocess.Popen(
             ["paplay", sound], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-    for _ in range(3):
-        sys.stdout.write("\a")
-        sys.stdout.flush()
-        time.sleep(0.4)
+    return message
+
+
+def finished(message, colour, quiet):
+    if quiet:                                    # no animation rang them, so ring here
+        for _ in range(3):
+            sys.stdout.write("\a")
+            sys.stdout.flush()
+            time.sleep(0.4)
     tick = (GREEN if colour else "") + "✓" + (RESET if colour else "")
     print("%s %s — %s" % (tick, message, datetime.now().strftime("%H:%M")))
 
@@ -1213,13 +1460,16 @@ def record(started, goal, planned, actual, completed):
         )
 
 
-def countdown(goal, minutes, theme_name=RANDOM, preview=False):
+def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
     theme_name = pick(theme_name)
     total = minutes * 60.0
     started_at = datetime.now()
     colour = colours_on()
     interactive = sys.stdin.isatty() and sys.stdout.isatty()
     theme = THEMES[theme_name]()
+    # A preview compresses whatever a theme saves for once a block, so that the
+    # rare things are actually watchable instead of arriving in ten minutes.
+    theme.total = 45.0 if preview else total
 
     remaining = total
     paused = False
@@ -1247,6 +1497,10 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False):
                 frame(canvas)
             if remaining <= 0:
                 completed = True
+                if not preview:
+                    message = alarm(goal, minutes)
+                    if interactive and finale:
+                        celebrate(theme, goal, minutes, colour)
                 break
 
             if not interactive:
@@ -1276,7 +1530,7 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False):
 
     record(started_at, goal, minutes, actual, completed)
     if completed:
-        alarm(goal, minutes, colour)
+        finished(message, colour, quiet=not (interactive and finale))
     else:
         print("Stopped after %.1f min of %g — %s" % (actual, minutes, goal))
     return 0 if completed else 1
@@ -1342,6 +1596,8 @@ def main():
     parser.add_argument("-p", "--preview", metavar="THEME",
                         choices=sorted(THEMES) + [RANDOM], nargs="?", const=default_theme,
                         help="watch a theme run, logging nothing; q to leave")
+    parser.add_argument("--no-finale", action="store_true",
+                        help="end quietly, without the finish animation")
     parser.add_argument("-l", "--log", action="store_true",
                         help="show the sessions logged so far and exit")
     parser.add_argument("-n", "--limit", type=int, default=15,
@@ -1371,7 +1627,7 @@ def main():
         print("A block needs a goal. Nothing started.", file=sys.stderr)
         return 1
 
-    return countdown(goal, args.minutes, args.theme)
+    return countdown(goal, args.minutes, args.theme, finale=not args.no_finale)
 
 
 if __name__ == "__main__":
