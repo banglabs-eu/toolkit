@@ -22,6 +22,8 @@ dpkg -s rsync          &>/dev/null || PACKAGES+=(rsync)
 # pslag: ffmpeg reads the video, numpy does the arithmetic. Both above.
 # music-index: ffmpeg decodes the audio (above). librosa and mutagen are pip-only,
 # so the tool builds its own venv under ~/.local/share/bpm-scan on first run.
+# focus: standard library only. notify-send and paplay are used for the alarm
+# if present, and skipped without complaint if not.
 
 if [[ ${#PACKAGES[@]} -gt 0 ]]; then
     info "Installing missing packages: ${PACKAGES[*]}"
@@ -47,6 +49,9 @@ echo "  pslag — linked to $BIN_DIR"
 sudo ln -sf "$SCRIPT_DIR/music-index" "$BIN_DIR/music-index"
 echo "  music-index — linked to $BIN_DIR"
 
+sudo ln -sf "$SCRIPT_DIR/focus" "$BIN_DIR/focus"
+echo "  focus — linked to $BIN_DIR"
+
 echo ""
 info "Done!"
 echo "  Usage: sudo cleanusb"
@@ -54,3 +59,4 @@ echo "         bravia-ready --list"
 echo "         ripcd"
 echo "         pslag rig --label local"
 echo "         music-index"
+echo "         focus \"rewrite the intro\""

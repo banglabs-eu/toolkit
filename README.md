@@ -371,6 +371,36 @@ comparison reads straight off that table.
 
 Needs `ffmpeg` and `python3-numpy`. No root, no GUI toolkit.
 
+### focus
+
+A pomodoro that insists on the first half of the ritual: name what the block is for, and that sentence stays on screen beside the clock for the whole 25 minutes.
+
+```bash
+focus                          # asks for the goal, then counts 25 minutes down
+focus "rewrite the intro"      # goal on the command line, same 25 minutes
+focus -m 50 "deep work"        # a different length
+focus --log                    # sessions so far, today's total on top
+focus --log -n 40              # more of the history
+```
+
+While it runs, `space` pauses and resumes, `q` stops early, and `Ctrl-C` does
+the same. The clock turns amber in the last minute. When it reaches zero the
+terminal bell rings, a desktop notification fires (`notify-send`) and a chime
+plays (`paplay`), each skipped quietly if not installed.
+
+Every session — goal, planned length, how long it actually ran, whether it
+finished — is appended to `~/focus/sessions.csv`, which is what `--log` prints:
+
+```
+Today 75 min · last 7 days 320 min · 48 sessions logged
+
+Tue 15 Sep 09:10  rewrite the intro          25.0 min  done
+Tue 15 Sep 09:41  chase the flaky test        8.2 min  stopped
+```
+
+It runs on the alternate screen, so whatever was in the terminal comes back
+when the block ends. Python 3 standard library only, no root.
+
 ### backup
 
 Backs up your system to pCloud via rclone. Excludes build artifacts, caches, secrets, and SSH keys. Skips metered networks automatically.

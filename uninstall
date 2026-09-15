@@ -10,5 +10,6 @@ sudo rm -f /usr/local/bin/bravia-ready
 sudo rm -f /usr/local/bin/ripcd
 sudo rm -f /usr/local/bin/pslag
 sudo rm -f /usr/local/bin/music-index
+sudo rm -f /usr/local/bin/focus
 
 info "Done. Everything removed."

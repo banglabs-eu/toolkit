@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""focus — name a goal, then count 25 minutes down against it.
+
+A pomodoro that insists on the first half of the ritual: you say what the
+block is for before the clock starts, and that sentence stays on screen the
+whole time. When the countdown ends it rings, and the session — goal, length,
+whether you saw it through — is appended to a log you can read back.
+
+    focus                          ask for the goal, then count 25 minutes down
+    focus "rewrite the intro"      goal on the command line, same 25 minutes
+    focus -m 50 "deep work"        a different length
+    focus --log                    the sessions so far, today's total on top
+
+While it runs:  space pauses and resumes, q stops early, Ctrl-C does the same.
+
+Everything lands in ~/focus/sessions.csv. Nothing outside the standard library
+is needed; notify-send and paplay are used for the alarm if they exist.
+"""
+
+import argparse
+import csv
+import os
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import termios
+import time
+import tty
+from datetime import datetime, timedelta
+
+DEFAULT_MINUTES = 25
+LOG_DIR = os.path.expanduser("~/focus")
+LOG_FILE = os.path.join(LOG_DIR, "sessions.csv")
+LOG_FIELDS = ["started", "goal", "planned_minutes", "actual_minutes", "completed"]
+
+ACCENT = "\033[38;2;99;102;241m"   # Bang Labs indigo
+AMBER = "\033[38;2;245;158;11m"
+GREEN = "\033[38;2;34;197;94m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RESET = "\033[0m"
+
+# 3x5 bitmaps, one string per row, drawn two columns wide so the digits come
+# out roughly square in a terminal cell grid.
+GLYPHS = {
+    "0": ("111", "101", "101", "101", "111"),
+    "1": ("010", "110", "010", "010", "111"),
+    "2": ("111", "001", "111", "100", "111"),
+    "3": ("111", "001", "111", "001", "111"),
+    "4": ("101", "101", "111", "001", "001"),
+    "5": ("111", "100", "111", "001", "111"),
+    "6": ("111", "100", "111", "101", "111"),
+    "7": ("111", "001", "010", "010", "010"),
+    "8": ("111", "101", "111", "101", "111"),
+    "9": ("111", "101", "111", "001", "111"),
+    ":": ("0", "1", "0", "1", "0"),
+}
+GLYPH_ROWS = 5
+
+
+def colours_on():
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def big(text):
+    """Render a clock string as a list of GLYPH_ROWS wide lines."""
+    lines = []
+    for row in range(GLYPH_ROWS):
+        parts = []
+        for ch in text:
+            bits = GLYPHS.get(ch, ("000",) * GLYPH_ROWS)[row]
+            parts.append("".join("██" if b == "1" else "  " for b in bits))
+        lines.append("  ".join(parts))
+    return lines
+
+
+def clock(seconds):
+    seconds = max(0, int(seconds + 0.5))
+    if seconds >= 3600:
+        return "%d:%02d:%02d" % (seconds // 3600, seconds % 3600 // 60, seconds % 60)
+    return "%02d:%02d" % (seconds // 60, seconds % 60)
+
+
+def centre(line, width, visible=None):
+    pad = max(0, (width - (len(line) if visible is None else visible)) // 2)
+    return " " * pad + line
+
+
+def bar(fraction, width):
+    filled = int(round(fraction * width))
+    return "━" * filled, "━" * (width - filled)
+
+
+def draw(goal, remaining, total, paused, started_at, colour):
+    cols, rows = shutil.get_terminal_size((80, 24))
+    width = max(20, cols)
+    text = clock(remaining)
+    if len(big(text)[0]) <= width - 2:
+        digits, digit_width = big(text), len(big(text)[0])
+    else:                                   # too narrow for block digits
+        digits, digit_width = [text], len(text)
+
+    if not colour:
+        tint = bold = dim = reset = ""
+    else:
+        reset, bold, dim = RESET, BOLD, DIM
+        if paused:
+            tint = AMBER
+        elif remaining <= 60:
+            tint = AMBER
+        else:
+            tint = ACCENT
+
+    body = []
+    goal_line = goal if len(goal) <= width - 4 else goal[: width - 5] + "…"
+    body.append(centre(bold + goal_line + reset, width, len(goal_line)))
+    body.append("")
+    for line in digits:
+        body.append(centre(tint + line + reset, width, digit_width))
+    body.append("")
+
+    bar_width = min(44, max(10, width - 10))
+    done, left = bar(1 - remaining / total if total else 1, bar_width)
+    body.append(centre(tint + done + reset + dim + left + reset, width, bar_width))
+    body.append("")
+
+    length = "%g min" % (total / 60) if total % 60 else "%d min" % (total // 60)
+    state = "paused" if paused else "started " + started_at.strftime("%H:%M")
+    keys = "space %s · q stop" % ("resume" if paused else "pause")
+    for hint in ("%s · %s · %s" % (length, state, keys), "%s · %s" % (length, keys), keys):
+        if len(hint) <= width - 2:
+            break
+    body.append(centre(dim + hint + reset, width, len(hint)))
+
+    top = max(0, (rows - len(body)) // 2)
+    out = ["\033[H"]
+    for line in [""] * top + body:
+        out.append(line + "\033[K\n")
+    out.append("\033[J")
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
+
+
+def alarm(goal, minutes, colour):
+    message = "%g minutes done — %s" % (minutes, goal)
+    if shutil.which("notify-send"):
+        subprocess.run(
+            ["notify-send", "--urgency=critical", "--app-name=focus", "focus", message],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    sound = "/usr/share/sounds/freedesktop/stereo/complete.oga"
+    if shutil.which("paplay") and os.path.exists(sound):
+        subprocess.Popen(
+            ["paplay", sound], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    for _ in range(3):
+        sys.stdout.write("\a")
+        sys.stdout.flush()
+        time.sleep(0.4)
+    tick = (GREEN if colour else "") + "✓" + (RESET if colour else "")
+    print("%s %s — %s" % (tick, message, datetime.now().strftime("%H:%M")))
+
+
+def record(started, goal, planned, actual, completed):
+    os.makedirs(LOG_DIR, exist_ok=True)
+    new = not os.path.exists(LOG_FILE)
+    with open(LOG_FILE, "a", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=LOG_FIELDS)
+        if new:
+            writer.writeheader()
+        writer.writerow(
+            {
+                "started": started.isoformat(timespec="seconds"),
+                "goal": goal,
+                "planned_minutes": "%g" % planned,
+                "actual_minutes": "%.1f" % actual,
+                "completed": "yes" if completed else "no",
+            }
+        )
+
+
+def countdown(goal, minutes):
+    total = minutes * 60.0
+    started_at = datetime.now()
+    colour = colours_on()
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
+    remaining = total
+    paused = False
+    resumed_at = time.monotonic()
+    old_attrs = None
+
+    if interactive:
+        old_attrs = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())      # cbreak, not raw: Ctrl-C still works
+        # Alternate screen, so whatever was in the terminal comes back at the end.
+        sys.stdout.write("\033[?1049h\033[?25l\033[2J")
+
+    completed = False
+    try:
+        while True:
+            if not paused:
+                now = time.monotonic()
+                remaining = max(0.0, remaining - (now - resumed_at))
+                resumed_at = now
+            if interactive:
+                draw(goal, remaining, total, paused, started_at, colour)
+            if remaining <= 0:
+                completed = True
+                break
+
+            if not interactive:
+                time.sleep(min(remaining, 1.0))
+                continue
+
+            ready, _, _ = select.select([sys.stdin], [], [], 0.2)
+            if not ready:
+                continue
+            key = sys.stdin.read(1)
+            if key in ("q", "Q", "\x1b"):
+                break
+            if key == " ":
+                paused = not paused
+                resumed_at = time.monotonic()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if interactive:
+            sys.stdout.write("\033[?25h\033[?1049l")
+            sys.stdout.flush()
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_attrs)
+
+    actual = (total - remaining) / 60.0
+    record(started_at, goal, minutes, actual, completed)
+    if completed:
+        alarm(goal, minutes, colour)
+    else:
+        print("Stopped after %.1f min of %g — %s" % (actual, minutes, goal))
+    return 0 if completed else 1
+
+
+def show_log(limit):
+    if not os.path.exists(LOG_FILE):
+        print("No sessions yet. Run: focus \"your goal\"")
+        return 0
+    with open(LOG_FILE, newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    if not rows:
+        print("No sessions yet. Run: focus \"your goal\"")
+        return 0
+
+    today = datetime.now().date()
+    week = today - timedelta(days=6)
+    today_min = week_min = 0.0
+    for row in rows:
+        day = datetime.fromisoformat(row["started"]).date()
+        minutes = float(row["actual_minutes"])
+        if day == today:
+            today_min += minutes
+        if day >= week:
+            week_min += minutes
+    print("Today %d min · last 7 days %d min · %d sessions logged\n"
+          % (today_min, week_min, len(rows)))
+
+    goal_width = max(20, min(50, max(len(r["goal"]) for r in rows[-limit:])))
+    for row in rows[-limit:]:
+        when = datetime.fromisoformat(row["started"])
+        goal = row["goal"]
+        if len(goal) > goal_width:
+            goal = goal[: goal_width - 1] + "…"
+        print("%s  %-*s  %5s min  %s"
+              % (when.strftime("%a %d %b %H:%M"), goal_width, goal,
+                 row["actual_minutes"],
+                 "done" if row["completed"] == "yes" else "stopped"))
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="focus",
+        description="Name a goal, then count %d minutes down against it." % DEFAULT_MINUTES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="space pauses, q stops early. Sessions are logged to " + LOG_FILE,
+    )
+    parser.add_argument("goal", nargs="*", help="what this block is for")
+    parser.add_argument("-m", "--minutes", type=float, default=DEFAULT_MINUTES,
+                        help="length of the countdown (default: %d)" % DEFAULT_MINUTES)
+    parser.add_argument("-l", "--log", action="store_true",
+                        help="show the sessions logged so far and exit")
+    parser.add_argument("-n", "--limit", type=int, default=15,
+                        help="how many sessions --log prints (default: 15)")
+    args = parser.parse_args()
+
+    if args.log:
+        return show_log(args.limit)
+
+    if args.minutes <= 0:
+        parser.error("--minutes must be greater than zero")
+
+    goal = " ".join(args.goal).strip()
+    if not goal:
+        try:
+            goal = input("Goal: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 1
+    if not goal:
+        print("A block needs a goal. Nothing started.", file=sys.stderr)
+        return 1
+
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    return countdown(goal, args.minutes)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
