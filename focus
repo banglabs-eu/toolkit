@@ -12,6 +12,8 @@ whether you saw it through — is appended to a log you can read back.
     focus -t aquarium "read"       pick the scene instead of taking pot luck
     focus --preview airport        watch a theme without starting a block
     focus --log                    the sessions so far, today's total on top
+    focus --history                what you did today, block by block
+    focus --history yesterday      the same for yesterday, a weekday or a date
     focus --no-finale "quiet"      land the block without the celebration
     focus --me                     set the name and birthday it greets you by
 
@@ -60,8 +62,15 @@ A block that runs to zero ends on six seconds of celebration — fireworks, a
 shockwave or confetti, drawn at random over the theme, with DONE across the
 middle. Any key closes it early, --no-finale skips it.
 
-Everything lands in ~/focus/sessions.csv. Nothing outside the standard library
-is needed; notify-send and paplay are used for the alarm if they exist.
+Everything lands in ~/focus/sessions.csv. --log is the running tail of it;
+--history reads a single day back — when each block started and stopped, what
+it was for, how long you were away between them, and the whole day drawn as
+one strip of hours. It takes today, yesterday, a weekday name, a date written
+day first (14-9, 14/09/2026, ISO), a bare day of the month, or week for the
+last seven days at once.
+
+Nothing outside the standard library is needed; notify-send and paplay are
+used for the alarm if they exist.
 """
 
 import argparse
@@ -2353,12 +2362,192 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
     return 0 if completed else 1
 
 
-def show_log(limit):
+def read_log():
+    """Every session logged so far, oldest first, or an empty list."""
     if not os.path.exists(LOG_FILE):
+        return []
+    with open(LOG_FILE, newline="") as fh:
+        return list(csv.DictReader(fh))
+
+
+def paint(text, tint, colour=True):
+    return (tint + text + RESET) if (colour and tint) else text
+
+
+def spell(minutes):
+    """95 minutes reads better as 1 h 35 min."""
+    minutes = int(round(minutes))
+    hours, rest = divmod(minutes, 60)
+    if not hours:
+        return "%d min" % rest
+    return "%d h" % hours if not rest else "%d h %d min" % (hours, rest)
+
+
+def parse_when(text):
+    """A day, written as it comes to mind.
+
+    today, yesterday, a weekday name for the most recent one, a bare number
+    for that day of this month, or a date — day first, as parse_birthday reads
+    it: 14-9, 14/09/2026, or ISO. Returns None if it cannot be read.
+    """
+    today = date.today()
+    word = text.strip().lower()
+    if word in ("", "today"):
+        return today
+    if word in ("yesterday", "yday"):
+        return today - timedelta(days=1)
+    if len(word) >= 3 and word.isalpha():
+        for back in range(7):                  # the most recent Tuesday, etc.
+            day = today - timedelta(days=back)
+            if day.strftime("%A").lower().startswith(word):
+                return day
+        return None
+
+    for separator in "-/.,":
+        word = word.replace(separator, " ")
+    parts = [part for part in word.split() if part.isdigit()]
+    try:
+        if len(parts) == 3 and len(parts[0]) == 4:
+            return date(int(parts[0]), int(parts[1]), int(parts[2]))
+        if len(parts) == 3:
+            year = int(parts[2])
+            return date(year + 2000 if year < 100 else year, int(parts[1]), int(parts[0]))
+        # A day with no year, or no month, means the most recent one that has
+        # already happened — nobody asks what they did next Thursday.
+        if len(parts) == 2:
+            day = date(today.year, int(parts[1]), int(parts[0]))
+            return day if day <= today else date(today.year - 1, int(parts[1]), int(parts[0]))
+        if len(parts) == 1:
+            day = date(today.year, today.month, int(parts[0]))
+            if day > today:
+                month = today.month - 1 or 12
+                day = date(today.year - (today.month == 1), month, int(parts[0]))
+            return day
+    except ValueError:
+        return None
+    return None
+
+
+def blocks_on(rows, day):
+    """Every session that started on that day, in the order it happened."""
+    blocks = []
+    for row in rows:
+        started = datetime.fromisoformat(row["started"])
+        if started.date() != day:
+            continue
+        minutes = float(row["actual_minutes"])
+        blocks.append((started, started + timedelta(minutes=minutes), minutes,
+                       row["goal"], row["completed"] == "yes"))
+    return sorted(blocks)
+
+
+def strip(blocks, width):
+    """The day as one row of cells, from the hour the first block started to
+    the hour the last one ended: filled where you were working, dots between."""
+    first = blocks[0][0].replace(minute=0, second=0, microsecond=0)
+    last = max(block[1] for block in blocks)
+    ceiling = last.replace(minute=0, second=0, microsecond=0)
+    if ceiling < last:
+        ceiling += timedelta(hours=1)
+    span = max((ceiling - first).total_seconds(), 3600.0)
+    cells = ["·"] * width
+    for started, ended, _, _, completed in blocks:
+        start = int((started - first).total_seconds() / span * width)
+        stop = int(math.ceil((ended - first).total_seconds() / span * width))
+        for cell in range(max(0, start), min(width, max(stop, start + 1))):
+            cells[cell] = "█" if completed else "▒"
+    return first, ceiling, "".join(cells)
+
+
+def show_day(rows, day, colour, cols):
+    """One day: what each block was for, when it started, when it stopped."""
+    title = day.strftime("%A %-d %B")
+    if day.year != date.today().year:
+        title += day.strftime(" %Y")
+    blocks = blocks_on(rows, day)
+    if not blocks:
+        print("%s — nothing logged." % paint(title, BOLD, colour))
+        return 0.0
+
+    focused = sum(block[2] for block in blocks)
+    summary = ("%d block%s · %s focused · %s to %s"
+               % (len(blocks), "" if len(blocks) == 1 else "s", spell(focused),
+                  blocks[0][0].strftime("%H:%M"), blocks[-1][1].strftime("%H:%M")))
+    heading = paint(title, BOLD + ACCENT, colour)
+    if len(title) + len(summary) + 3 <= cols:
+        print("%s — %s" % (heading, summary))
+    else:                                      # too narrow for one line
+        print(heading)
+        print("  %s" % paint(summary, DIM, colour))
+    print()
+
+    room = max(20, cols - 38)
+    for index, (started, ended, minutes, goal, completed) in enumerate(blocks):
+        if index:
+            gap = (started - blocks[index - 1][1]).total_seconds() / 60.0
+            if gap >= 5:
+                print(paint("    ⋯  %s away" % spell(gap), DIM, colour))
+        if len(goal) > room:
+            goal = goal[: room - 1] + "…"
+        # Pad before colouring: the escape codes would count towards a width.
+        state = paint("%-7s" % ("done" if completed else "stopped"),
+                      GREEN if completed else AMBER, colour)
+        print("  %s–%s  %6s min  %s  %s"
+              % (started.strftime("%H:%M"), ended.strftime("%H:%M"),
+                 "%.1f" % minutes, state, goal))
+
+    print()
+    start, end, cells = strip(blocks, max(12, min(cols - 16, 60)))
+    print("  %s %s %s" % (paint(start.strftime("%H:%M"), DIM, colour),
+                          paint(cells, ACCENT, colour),
+                          paint(end.strftime("%H:%M"), DIM, colour)))
+    return focused
+
+
+def show_history(when):
+    """--history: a day at a time, or the last seven days at once."""
+    rows = read_log()
+    if not rows:
         print("No sessions yet. Run: focus \"your goal\"")
         return 0
-    with open(LOG_FILE, newline="") as fh:
-        rows = list(csv.DictReader(fh))
+    colour = colours_on()
+    cols = shutil.get_terminal_size((80, 24)).columns
+    today = date.today()
+
+    word = (when or "today").strip().lower()
+    if word in ("week", "7", "7d"):
+        days = [today - timedelta(days=back) for back in range(6, -1, -1)]
+        days = [day for day in days if blocks_on(rows, day)]
+        if not days:
+            print("Nothing logged in the last seven days.")
+            return 0
+    else:
+        day = parse_when(word)
+        if day is None:
+            print("I could not read \"%s\" as a day. Try today, yesterday, "
+                  "monday, 14-9 or 2026-09-14." % when, file=sys.stderr)
+            return 1
+        days = [day]
+
+    total = 0.0
+    for index, day in enumerate(days):
+        if index:
+            print()
+        total += show_day(rows, day, colour, cols)
+
+    if len(days) > 1:
+        print("\n%s across %d days." % (paint(spell(total), BOLD, colour), len(days)))
+    elif not total:
+        earlier = [datetime.fromisoformat(row["started"]).date() for row in rows]
+        earlier = [seen for seen in earlier if seen < days[0]]
+        if earlier:
+            print("The last block before that was %s."
+                  % max(earlier).strftime("%A %-d %B"))
+    return 0
+
+
+def show_log(limit):
+    rows = read_log()
     if not rows:
         print("No sessions yet. Run: focus \"your goal\"")
         return 0
@@ -2419,6 +2608,9 @@ def main():
                         help="end quietly, without the finish animation")
     parser.add_argument("-l", "--log", action="store_true",
                         help="show the sessions logged so far and exit")
+    parser.add_argument("-H", "--history", metavar="WHEN", nargs="?", const="today",
+                        help="what you did on a day: today, yesterday, monday, "
+                             "14-9, 2026-09-14, or week (default: today)")
     parser.add_argument("-n", "--limit", type=int, default=15,
                         help="how many sessions --log prints (default: 15)")
     args = parser.parse_args()
@@ -2426,6 +2618,9 @@ def main():
     if args.me:
         ask_profile(force=True)
         return 0
+
+    if args.history is not None:
+        return show_history(args.history)
 
     if args.log:
         return show_log(args.limit)

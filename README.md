@@ -384,6 +384,9 @@ focus -t matrix "refactor"     # pick one instead of taking pot luck
 focus -t plain "no distractions"   # back to a bare clock
 focus --preview galaxy         # watch a theme, logging nothing
 focus --log                    # sessions so far, today's total on top
+focus --history                # what you did today, block by block
+focus --history yesterday      # the same for yesterday
+focus --history 14-9           # or a weekday name, a date, or week
 ```
 
 While it runs, `space` pauses and resumes, `q` stops early, and `Ctrl-C` does
@@ -597,6 +600,34 @@ Today 75 min · last 7 days 320 min · 48 sessions logged
 Tue 15 Sep 09:10  rewrite the intro          25.0 min  done
 Tue 15 Sep 09:41  chase the flaky test        8.2 min  stopped
 ```
+
+#### The history
+
+`--log` is the running tail. `--history` reads one day back instead — when each
+block started and when it stopped, what it was for, how long you were away in
+between, and the whole day drawn as one strip of hours:
+
+```
+Tuesday 15 September — 4 blocks · 1 h 48 min focused · 09:15 to 14:30
+
+  09:15–09:40    25.0 min  done     rewrite the intro
+    ⋯  22 min away
+  10:02–10:10     8.2 min  stopped  chase the flaky test
+    ⋯  10 min away
+  10:20–11:10    50.0 min  done     deep work on the parser
+    ⋯  2 h 55 min away
+  14:05–14:30    25.0 min  done     review the PR backlog
+
+  09:00 ··█████···▒▒·█████████····························█████····· 15:00
+```
+
+Filled cells are blocks you saw through, shaded ones are blocks you stopped,
+dots are the time between. The day is named however it comes to mind: `today`
+(the default), `yesterday`, a weekday name for the most recent one, a bare
+number for that day of this month, a date written day first — `14-9`,
+`14/09/2026` — or ISO. `week` prints the last seven days at once, skipping the
+days you logged nothing, with the total underneath. A day with nothing on it
+says so, and points at the last one that has something.
 
 It runs on the alternate screen, so whatever was in the terminal comes back
 when the block ends. Python 3 standard library only, no root.
