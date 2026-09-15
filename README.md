@@ -419,6 +419,18 @@ it. Any key closes it early; `--no-finale` skips it for good.
             .                 any key to close  ·
 ```
 
+Closing it leaves three keys under the ✓ line: `f` starts a new session, which
+asks for the next goal and keeps the same length; `r` runs the same goal again;
+`q` gives the terminal back. One block can become an afternoon without typing
+the command again. A block you stop early ends there, as before, and so does one
+run with `--no-finale`.
+
+```
+✓ 25 minutes done — ship the theme work — 14:32
+
+  [f] new session   [r] repeat “ship the theme work”   [q] quit
+```
+
 #### Themes
 
 Every block draws a random scene behind the clock, a frame every tenth of a

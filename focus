@@ -62,7 +62,8 @@ While it runs:  space pauses and resumes, q stops early, Ctrl-C does the same.
 
 A block that runs to zero ends on six seconds of celebration — fireworks, a
 shockwave or confetti, drawn at random over the theme, with DONE across the
-middle. Any key closes it early, --no-finale skips it.
+middle. Any key closes it early, --no-finale skips it. Closing it asks what
+comes next: f starts a new session, r runs the same goal again, q quits.
 
 Everything lands in ~/focus/sessions.csv, on this machine and nowhere else.
 Run --login once and the record moves to your Bang Labs account instead — the
@@ -2229,6 +2230,51 @@ def finished(message, colour, quiet):
     print("%s %s — %s" % (tick, message, datetime.now().strftime("%H:%M")))
 
 
+def one_key(allowed):
+    """A single keypress, without the Enter that input() waits for."""
+    old = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+        while True:
+            key = sys.stdin.read(1)
+            if key in ("", "\x04", "\x1b"):        # end of input, Ctrl-D, Esc
+                return "q"
+            key = key.lower()
+            if key in allowed:
+                return key
+    except KeyboardInterrupt:
+        return "q"
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
+
+
+def ask_goal(prompt="Goal: "):
+    try:
+        return input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return ""
+
+
+def again(goal, minutes, colour):
+    """What follows a block that landed: a new goal, the same one, or nothing.
+
+    Returns the goal of the next block, or None to stop here.
+    """
+    short = goal if len(goal) <= 40 else goal[:39] + "…"
+    print()
+    print("  %s new session   %s repeat “%s”   %s quit" % (
+        paint("[f]", GREEN, colour), paint("[r]", GREEN, colour), short,
+        paint("[q]", GREEN, colour)))
+    choice = one_key("frq")
+    if choice == "q":
+        return None
+    if choice == "r":
+        print("  Again: %s — %g minutes" % (goal, minutes))
+        return goal
+    return ask_goal("  New goal (%g min): " % minutes) or None
+
+
 def load_profile():
     try:
         with open(PROFILE) as fh:
@@ -3106,7 +3152,9 @@ def main():
         epilog="themes:\n  " + "\n  ".join(
             ["%-9s %s" % (name, theme.blurb) for name, theme in THEMES.items()]
             + ["%-9s %s" % (RANDOM, "one of the above, drawn fresh for each block")]
-        ) + "\n\nspace pauses, q stops early. Sessions are logged to " + LOG_FILE
+        ) + "\n\nspace pauses, q stops early. A finished block asks what comes next:\n"
+          "f starts a new session, r runs the same goal again, q quits.\n"
+          "Sessions are logged to " + LOG_FILE
           + ",\nor to your Bang Labs account once you have run focus --login.",
     )
     parser.add_argument("goal", nargs="*", help="what this block is for")
@@ -3181,18 +3229,20 @@ def main():
 
     ask_profile()
 
-    goal = " ".join(args.goal).strip()
-    if not goal:
-        try:
-            goal = input("Goal: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 1
+    goal = " ".join(args.goal).strip() or ask_goal()
     if not goal:
         print("A block needs a goal. Nothing started.", file=sys.stderr)
         return 1
 
-    return countdown(goal, args.minutes, args.theme, finale=not args.no_finale)
+    finale = not args.no_finale
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    while True:
+        status = countdown(goal, args.minutes, args.theme, finale=finale)
+        if status != 0 or not (interactive and finale):
+            return status                        # stopped early, or nobody to ask
+        goal = again(goal, args.minutes, colours_on())
+        if not goal:
+            return status
 
 
 if __name__ == "__main__":
