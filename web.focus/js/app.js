@@ -150,7 +150,8 @@ function help(term) {
   term.write([["  " + padEnd(RANDOM, 10), ""],
               ["one of the above, drawn fresh for each block", DIM]]);
   term.write();
-  term.write([["While a block runs: space pauses, t changes the scene, q stops early.", DIM]]);
+  term.write([["While a block runs: space pauses, q stops early, and t opens the scene", DIM]]);
+  term.write([["picker: the arrows walk it, t, enter or escape go back to the block.", DIM]]);
   term.write([["A finished block asks what comes next: f new session, r again, q quit.", DIM]]);
   term.write([["The bottom right corner carries the GlyphClock reading — "
     + "glyphclock.bang-labs.eu.", DIM]]);

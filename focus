@@ -54,11 +54,13 @@ Your birthday outranks the lot: on the day, random draws nothing else. focus
 asks for your name and birthday once, keeps them in ~/focus/profile.json, and
 --me changes them. -t names any of these any day of the year.
 
-`-t plain` is the way back to a bare clock; random never picks it, and t
-walks through the lot in the order above, plain included.
+`-t plain` is the way back to a bare clock; random never picks it, and the
+picker walks the lot in the order above, plain included.
 
-While it runs:  space pauses and resumes, t changes the scene and names it,
-q stops early, Ctrl-C does the same.
+While it runs:  space pauses and resumes, q stops early, Ctrl-C does the
+same. t opens the scene picker along the bottom: the arrow keys walk the rota
+and draw each one behind the clock as you go, and t, enter or escape leaves it
+where you stopped. The block keeps counting the whole time.
 
 The bottom right corner keeps the GlyphClock reading: the glyph standing for
 this 90-minute block of the UTC day, one copy for the first half hour of it,
@@ -216,6 +218,54 @@ def glyphclock(moment=None):
     block = min(minute // 90, 15)
     turn = min(minute % 90 // 30, 2)
     return GLYPH_EMOJI[block], turn + 1, GLYPH_NAMES[block]
+
+
+ARROWS = {"A": "up", "B": "down", "C": "right", "D": "left"}
+_typed = b""                       # what one read took beyond a single keypress
+
+
+def read_key():
+    """One keypress, with the arrows read whole.
+
+    Straight off the descriptor rather than sys.stdin: an arrow is three bytes
+    — ESC [ C — and a buffered reader can swallow all three on a one-character
+    read, leaving select with nothing to say about the two behind it. A burst
+    that arrives together (an arrow held down) is peeled one key at a time.
+
+    Returns "up", "down", "left" or "right" for the arrows, the character for
+    anything else, "\x1b" for escape pressed on its own, and "" for a sequence
+    this does not know — a function key should not stop a block.
+    """
+    global _typed
+    if not _typed:
+        _typed = os.read(sys.stdin.fileno(), 32)
+        if not _typed:
+            return "q"                           # end of input, nothing more coming
+    data, _typed = _typed, b""
+
+    if data[:1] != b"\x1b":
+        text = data.decode("utf-8", "replace")
+        _typed = text[1:].encode()
+        return text[0]
+    if len(data) == 1:
+        return "\x1b"
+
+    at = 2                                       # past the ESC and its [ or O
+    while at < len(data) and chr(data[at]) not in "ABCDEFHPQRS~":
+        at += 1
+    head, _typed = data[: at + 1], data[at + 1:]
+    if head[1:2] in (b"[", b"O") and chr(head[-1]) in ARROWS:
+        return ARROWS[chr(head[-1])]
+    return ""
+
+
+def unread():
+    """Whether a burst already taken off the descriptor still holds a key.
+
+    select has nothing to say about it — those bytes are out of the kernel
+    already — so the countdown asks this before deciding it has nothing to do.
+    """
+    return bool(_typed)
 
 
 def line(x0, y0, x1, y1):
@@ -1960,7 +2010,7 @@ THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galax
                                   Birthday)}
 
 
-def compose(canvas, goal, remaining, total, paused, started_at, naming=None):
+def compose(canvas, goal, remaining, total, paused, started_at, choosing=None):
     """The goal, the clock, the bar and the hint, centred over whatever scene."""
     cols, rows = canvas.cols, canvas.rows
     tint = AMBER if paused or remaining <= 60 else ACCENT
@@ -1977,9 +2027,14 @@ def compose(canvas, goal, remaining, total, paused, started_at, naming=None):
 
     length = "%g min" % (total / 60) if total % 60 else "%d min" % (total // 60)
     state = "paused" if paused else "started " + started_at.strftime("%H:%M")
-    keys = "space %s · t theme · q stop" % ("resume" if paused else "pause")
+    if choosing is None:
+        keys = "space %s · t theme · q stop" % ("resume" if paused else "pause")
+        short = "space · t · q"
+    else:                                  # the picker says how to leave it
+        keys = "← → scene · t, enter or esc to go back"
+        short = "← → · enter"
     for hint in ("%s · %s · %s" % (length, state, keys), "%s · %s" % (length, keys),
-                 keys, "space · t · q"):          # the last one fits anything
+                 keys, short):                        # the last one fits anything
         if len(hint) <= cols - 2:
             break
 
@@ -1999,8 +2054,8 @@ def compose(canvas, goal, remaining, total, paused, started_at, naming=None):
 
     below = top + len(lines)
     taken = corner(canvas, below)
-    if naming:
-        label(canvas, naming, below, canvas.cols - 4 - taken)
+    if choosing is not None:
+        picker(canvas, choosing, below, canvas.cols - 4 - taken)
 
 
 def corner(canvas, below):
@@ -2024,16 +2079,46 @@ def corner(canvas, below):
     return 0
 
 
-def label(canvas, name, below, room):
-    """Which scene is running, bottom left, for the seconds after t changed it."""
+def picker(canvas, at, below, room):
+    """The scene rota along the bottom, with the one on screen picked out.
+
+    Only as much of it as fits: the list is windowed around the choice and
+    grown outwards until the room runs out, with a chevron on whichever side
+    still has names behind it. The scene itself is the preview — this is only
+    the label for what is already being drawn.
+    """
     row = canvas.rows - 2
-    if row < below or room < 8:
+    if room < 12:                      # the GlyphClock has that row; go under it
+        row, room = canvas.rows - 1, canvas.cols - 2
+    if row < below or room < 12:
         return
-    for text in (" %s \u2014 %s " % (name, THEMES[name].blurb), " %s " % name):
-        if len(text) <= room:
-            canvas.put(1, row, text, DIM, opaque=True)
-            return
-    canvas.put(1, row, " " + name[: room - 3] + "\u2026 ", DIM, opaque=True)
+    rota = list(THEMES)
+    marked = ["[%s]" % name if i == at else " %s " % name
+              for i, name in enumerate(rota)]
+    left = right = at
+    width = len(marked[at]) + 2                       # the chevrons' own room
+    while True:
+        grew = False
+        if left > 0 and width + len(marked[left - 1]) <= room:
+            left -= 1
+            width += len(marked[left])
+            grew = True
+        if right < len(rota) - 1 and width + len(marked[right + 1]) <= room:
+            right += 1
+            width += len(marked[right])
+            grew = True
+        if not grew:
+            break
+
+    segments = [("‹" if left > 0 else " ", DIM)]
+    for i in range(left, right + 1):
+        segments.append((marked[i], BOLD + ACCENT if i == at else DIM))
+    segments.append(("›" if right < len(rota) - 1 else " ", DIM))
+
+    x = 1
+    for text, tint in segments:
+        canvas.put(x, row, text, tint, opaque=True)
+        x += len(text)
 
 
 def frame(canvas):
@@ -2759,9 +2844,15 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
     paused = False
     resumed_at = time.monotonic()
     old_attrs = None
-    rota = list(THEMES)                    # what t walks through, plain included
+    rota = list(THEMES)                    # what the picker walks, plain included
     at = rota.index(theme_name)
-    naming = 0.0                           # until when the scene names itself
+    picking = False                        # is the rota on screen?
+
+    def scene(index):
+        """The theme at that place in the rota, ready to draw."""
+        chosen = THEMES[rota[index]]()
+        chosen.total = 45.0 if preview else total
+        return chosen
 
     if interactive:
         old_attrs = termios.tcgetattr(sys.stdin)
@@ -2781,7 +2872,7 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
                 canvas = Canvas(max(20, cols), max(8, rows), colour)
                 theme.draw(canvas, now)
                 compose(canvas, goal, remaining, total, paused, started_at,
-                        theme_name if now < naming else None)
+                        at if picking else None)
                 frame(canvas)
             if remaining <= 0:
                 completed = True
@@ -2796,19 +2887,25 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
                 continue
 
             ready, _, _ = select.select([sys.stdin], [], [], FRAME)
-            if not ready:
+            if not ready and not unread():
                 continue
-            key = sys.stdin.read(1)
+            key = read_key()
+            if picking:                        # the rota is up; the block runs on
+                if key in ("left", "up", "right", "down"):
+                    at = (at + (1 if key in ("right", "down") else -1)) % len(rota)
+                    theme_name = rota[at]
+                    theme = scene(at)
+                elif key in ("t", "T", "\r", "\n", "\x1b", "q", "Q"):
+                    picking = False            # q closes the rota, it does not stop
+                elif key == " ":
+                    paused = not paused
+                continue
             if key in ("q", "Q", "\x1b"):
                 break
             if key == " ":
                 paused = not paused
-            if key in ("t", "T"):              # the next scene, and it says which
-                at = (at + 1) % len(rota)
-                theme_name = rota[at]
-                theme = THEMES[theme_name]()
-                theme.total = 45.0 if preview else total
-                naming = now + 3.0
+            if key in ("t", "T"):
+                picking = True
     except KeyboardInterrupt:
         pass
     finally:
@@ -3142,7 +3239,8 @@ def main():
         epilog="themes:\n  " + "\n  ".join(
             ["%-9s %s" % (name, theme.blurb) for name, theme in THEMES.items()]
             + ["%-9s %s" % (RANDOM, "one of the above, drawn fresh for each block")]
-        ) + "\n\nspace pauses, t changes the scene, q stops early. A finished block\n"
+        ) + "\n\nspace pauses, q stops early, t opens the scene picker: the arrows\n"
+          "walk it, t, enter or escape leave it. A finished block\n"
           "asks what comes next:\n"
           "f starts a new session, r runs the same goal again, q quits.\n"
           "Sessions are logged to " + LOG_FILE

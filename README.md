@@ -391,8 +391,9 @@ focus --login                  # keep the history in your Bang Labs account
 focus --whoami                 # which account this machine logs to
 ```
 
-While it runs, `space` pauses and resumes, `t` changes the scene, `q` stops
-early, and `Ctrl-C` does the same. The clock turns amber in the last minute. When it reaches zero the
+While it runs, `space` pauses and resumes, `t` opens the scene picker, `q`
+stops early, and `Ctrl-C` does the same. The clock turns amber in the last
+minute. When it reaches zero the
 terminal bell rings, a desktop notification fires (`notify-send`) and a chime
 plays (`paplay`), each skipped quietly if not installed.
 
@@ -457,14 +458,19 @@ second. `-t` picks one instead, and `$FOCUS_THEME` changes what the default is �
 set it to `plain` for a bare clock, or to a theme name to stop the lottery.
 Random never draws `plain`. A frame costs between 0.2% and 0.9% of one core.
 
-Pressing `t` during a block changes the scene there and then, and names the new
-one in the bottom left for three seconds. It walks the whole list in order,
-`plain` and the four seasonal scenes included, whatever the date — the block
-keeps running throughout, and the one you land on is the one the session is
-logged under.
+Pressing `t` during a block puts the rota along the bottom. The arrow keys walk
+it — left and right, or up and down — and each one is drawn behind the clock as
+you land on it, so the scene itself is the preview. `t`, `enter` or `escape`
+puts the strip away and leaves you on whatever you stopped at; `q` closes it
+too, so browsing can never stop the block by accident. The list holds `plain`
+and the four seasonal scenes whatever the date, it scrolls when the window is
+too narrow for all of it, and the clock counts down the whole time. The scene
+you finish on is the one the session is logged under.
 
 ```
-  aquarium — fish, seaweed and a smoking volcano             cactus 🌵 🌵
+   plain  aquarium  airport [space] galaxy  desert  farm  matrix  neurons ›
+
+  25 min · started 14:05 · ← → scene · t, enter or esc to go back
 ```
 
 Four themes keep to their dates. Random offers `haunted` only during the

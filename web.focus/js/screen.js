@@ -9,6 +9,12 @@ import { DIM, ESC, ETX, VS16, readTint } from "./util.js";
 
 const EMOJI = /\p{Extended_Pictographic}/u;
 
+// The arrows arrive as names, the way the script reads them out of an escape
+// sequence, so a block can tell one from a typed character.
+const ARROWS = {
+  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+};
+
 function escape(text) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -190,7 +196,11 @@ export class Term {
     }
 
     if (this.mode === "key" || this.mode === "block") {
-      if (event.key.length === 1 || ["Escape", "Enter", "Backspace"].includes(event.key)) {
+      if (ARROWS[event.key]) {
+        event.preventDefault();
+        this.press(ARROWS[event.key]);
+      } else if (event.key.length === 1
+                 || ["Escape", "Enter", "Backspace"].includes(event.key)) {
         event.preventDefault();
         this.press(event.key === "Escape" ? ESC
           : event.key === "Enter" ? "\r" : event.key);

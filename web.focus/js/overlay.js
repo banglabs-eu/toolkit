@@ -18,7 +18,8 @@ export const SPARKS = [rgb(255, 215, 95), rgb(255, 125, 90), rgb(120, 220, 255),
                        rgb(195, 145, 255), rgb(140, 250, 150), rgb(255, 255, 255)];
 
 /** The goal, the clock, the bar and the hint, centred over whatever scene. */
-export function compose(canvas, goal, remaining, total, paused, startedAt, naming = null) {
+export function compose(canvas, goal, remaining, total, paused, startedAt,
+                        choosing = null) {
   const cols = canvas.cols, rows = canvas.rows;
   const tint = (paused || remaining <= 60) ? AMBER : ACCENT;
 
@@ -33,10 +34,15 @@ export function compose(canvas, goal, remaining, total, paused, startedAt, namin
 
   const length = total % 60 ? `${number(total / 60)} min` : `${Math.floor(total / 60)} min`;
   const state = paused ? "paused" : "started " + hhmm(startedAt);
-  const keys = `space ${paused ? "resume" : "pause"} · t theme · q stop`;
+  let keys = `space ${paused ? "resume" : "pause"} · t theme · q stop`;
+  let short = "space · t · q";
+  if (choosing !== null) {                    // the picker says how to leave it
+    keys = "← → scene · t, enter or esc to go back";
+    short = "← → · enter";
+  }
   let hint = keys;
   for (const option of [`${length} · ${state} · ${keys}`, `${length} · ${keys}`,
-                        keys, "space · t · q"]) {   // the last one fits anything
+                        keys, short]) {       // the last one fits anything
     hint = option;
     if (width(option) <= cols - 2) break;
   }
@@ -59,7 +65,7 @@ export function compose(canvas, goal, remaining, total, paused, startedAt, namin
 
   const below = top + lines.length;
   const taken = corner(canvas, below);
-  if (naming) label(canvas, naming, below, cols - 4 - taken);
+  if (choosing !== null) picker(canvas, choosing, below, cols - 4 - taken);
 }
 
 /** The GlyphClock reading, dim in the bottom right, out of the clock's way.
@@ -84,17 +90,50 @@ export function corner(canvas, below) {
   return 0;
 }
 
-/** Which scene is running, bottom left, for the seconds after t changed it. */
-export function label(canvas, name, below, room) {
-  const row = canvas.rows - 2;
-  if (row < below || room < 8) return;
-  for (const text of [` ${name} — ${THEMES.get(name).blurb} `, ` ${name} `]) {
-    if (width(text) <= room) {
-      canvas.put(1, row, text, DIM, true);
-      return;
-    }
+/** The scene rota along the bottom, with the one on screen picked out.
+ *
+ * Only as much of it as fits: the list is windowed around the choice and grown
+ * outwards until the room runs out, with a chevron on whichever side still has
+ * names behind it. The scene itself is the preview — this is only the label
+ * for what is already being drawn.
+ */
+export function picker(canvas, at, below, room) {
+  let row = canvas.rows - 2;
+  if (room < 12) {                            // the GlyphClock has that row
+    row = canvas.rows - 1;
+    room = canvas.cols - 2;
   }
-  canvas.put(1, row, " " + cut(name, room - 3) + "… ", DIM, true);
+  if (row < below || room < 12) return;
+  const rota = [...THEMES.keys()];
+  const marked = rota.map((name, i) => (i === at ? `[${name}]` : ` ${name} `));
+  let left = at, right = at;
+  let taken = width(marked[at]) + 2;          // the chevrons' own room
+  for (;;) {
+    let grew = false;
+    if (left > 0 && taken + width(marked[left - 1]) <= room) {
+      left--;
+      taken += width(marked[left]);
+      grew = true;
+    }
+    if (right < rota.length - 1 && taken + width(marked[right + 1]) <= room) {
+      right++;
+      taken += width(marked[right]);
+      grew = true;
+    }
+    if (!grew) break;
+  }
+
+  const segments = [[left > 0 ? "‹" : " ", DIM]];
+  for (let i = left; i <= right; i++) {
+    segments.push([marked[i], i === at ? BOLD + ACCENT : DIM]);
+  }
+  segments.push([right < rota.length - 1 ? "›" : " ", DIM]);
+
+  let x = 1;
+  for (const [text, tint] of segments) {
+    canvas.put(x, row, text, tint, true);
+    x += width(text);
+  }
 }
 
 /** DONE across the middle, with what it was for underneath. */

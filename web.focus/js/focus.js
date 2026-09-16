@@ -113,24 +113,39 @@ export async function countdown(term, goal, minutes, themeName,
   let remaining = total;
   let paused = false;
   let resumedAt = ticking();
-  const rota = [...THEMES.keys()];             // what t walks through, plain included
+  const rota = [...THEMES.keys()];             // what the picker walks, plain included
   let at = rota.indexOf(themeName);
-  let naming = 0.0;                            // until when the scene names itself
+  let picking = false;                         // is the rota on screen?
   let completed = false;
   let stopped = false;
 
+  /** The theme at that place in the rota, ready to draw. */
+  const scene = (index) => {
+    const chosen = new (THEMES.get(rota[index]))();
+    chosen.total = preview ? 45.0 : total;
+    return chosen;
+  };
+
   term.enterAlt();
   term.onkey = (key) => {
+    if (picking) {                             // the rota is up; the block runs on
+      if (key === "left" || key === "up" || key === "right" || key === "down") {
+        at = mod(at + (key === "right" || key === "down" ? 1 : -1), rota.length);
+        themeName = rota[at];
+        theme = scene(at);
+      } else if (["t", "T", "\r", ESC, ETX, "q", "Q"].includes(key)) {
+        picking = false;                       // q closes the rota, it does not stop
+      } else if (key === " ") {
+        paused = !paused;
+      }
+      return;
+    }
     if (key === "q" || key === "Q" || key === ESC || key === ETX) {
       stopped = true;
     } else if (key === " ") {
       paused = !paused;
-    } else if (key === "t" || key === "T") {   // the next scene, and it says which
-      at = mod(at + 1, rota.length);
-      themeName = rota[at];
-      theme = new (THEMES.get(themeName))();
-      theme.total = preview ? 45.0 : total;
-      naming = ticking() + 3.0;
+    } else if (key === "t" || key === "T") {
+      picking = true;
     }
   };
 
@@ -146,7 +161,7 @@ export async function countdown(term, goal, minutes, themeName,
         const canvas = new Canvas(term.cols, term.rows);
         theme.draw(canvas, now);
         compose(canvas, goal, remaining, total, paused, startedAt,
-                now < naming ? themeName : null);
+                picking ? at : null);
         term.frame(canvas);
       }
       if (remaining <= 0) {

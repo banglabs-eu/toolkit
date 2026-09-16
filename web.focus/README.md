@@ -43,8 +43,9 @@ over. `--help` prints the list.
 | `--default-theme matrix` | what `$FOCUS_THEME` is to the script |
 | `clear` | empty the scrollback |
 
-While a block runs: `space` pauses, `t` changes the scene and names it, `q`
-stops early. A block that reaches zero rings, draws six seconds of fireworks,
+While a block runs: `space` pauses, `t` opens the scene picker — the arrow
+keys walk the rota, each scene drawn behind the clock as you reach it, and
+`t`, `enter` or `escape` goes back to the block — and `q` stops early. A block that reaches zero rings, draws six seconds of fireworks,
 a shockwave or confetti, and then asks what comes next — `f` new session, `r`
 the same goal again, `q` quit. Up and down walk back through what you typed.
 
