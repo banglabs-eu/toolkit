@@ -37,7 +37,12 @@ html, body {
 #terminal {
   position: fixed;
   inset: 0;
-  padding: var(--gutter);
+  /* Standalone on an iPhone has no browser chrome to clear the notch or the
+     home indicator, so the safe area has to come from here instead. */
+  padding: max(var(--gutter), env(safe-area-inset-top))
+           max(var(--gutter), env(safe-area-inset-right))
+           max(var(--gutter), env(safe-area-inset-bottom))
+           max(var(--gutter), env(safe-area-inset-left));
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;

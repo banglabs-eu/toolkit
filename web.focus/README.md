@@ -56,7 +56,11 @@ a shockwave or confetti, and then asks what comes next — `f` new session, `r`
 the same goal again, `q` quit. Up and down walk back through what you typed.
 
 On a phone the keyboard comes up on a tap, and a tap during a block is the
-space bar.
+space bar. Add it to an iOS or Android home screen (share sheet → *Add to
+Home Screen*) and it opens standalone, no browser chrome, its own icon —
+`manifest.json` and the `apple-mobile-web-app-*` tags in `index.html` are
+what make that offer appear. There is no separate iOS app; this page is the
+iOS version.
 
 ## Where the blocks go
 
@@ -116,6 +120,7 @@ before it ever reached the tunnel.
 index.html      the terminal: a scrollback, an alternate screen, an off-screen input
 styles.css      dark ground, JetBrains Mono, the cell box everything is measured against
 config.js       which accounts and toolkit API to talk to
+manifest.json   name, icon and standalone display mode for a home-screen install
 js/util.js      tints, random, the 3x5 clock font, Bresenham, Easter, the GlyphClock
 js/canvas.js    the character grid, sprites, and the theme base class
 js/themes.js    all twelve scenes

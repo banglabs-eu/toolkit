@@ -1,0 +1,17 @@
+{
+  "name": "focus",
+  "short_name": "focus",
+  "description": "Name a goal, then count 25 minutes down against it.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a0e17",
+  "theme_color": "#0a0e17",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0e17'/><rect x='6' y='14' width='20' height='4' rx='2' fill='%236366f1'/></svg>",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}

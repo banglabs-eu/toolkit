@@ -32,6 +32,19 @@ Three places Python and JavaScript disagree, all handled in `js/util.js`:
 - String length counts UTF-16 units. `width()`, `cut()` and `chars()` count
   characters, so an emoji in a goal stays one cell.
 
+## There is no separate iOS port
+
+An `ios.focus` directory existed briefly (a byte-for-byte copy of every file
+here plus a widget/Dynamic Island layer simulated in CSS — not real
+WidgetKit, since a web page cannot register one) and was folded back into
+this page instead of kept as a fourth codebase to keep in sync. "The iOS
+version" is this page, made installable: `manifest.json`,
+`apple-mobile-web-app-*` meta tags in `index.html`, and safe-area padding in
+`styles.css` for standalone mode's missing browser chrome. If a real native
+app is ever wanted — actual Home Screen widgets, Live Activities — that is a
+SwiftUI project calling `backend.toolkit` and `accounts` directly, the same
+pattern as `Snippets/ios.snippets`, not another HTML/CSS/JS tree here.
+
 ## What the web version adds, and why
 
 - **A shell.** The script is invoked with argv; the page has a prompt that
