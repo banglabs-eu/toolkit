@@ -8,6 +8,11 @@ A polyglot collection of scripts and tools for Pop!_OS. Shell, Python, and whate
 
 Scripts are organized by purpose. Each script should be self-contained or document its dependencies.
 
+`web.focus/` is the exception: a directory, not a script — the `focus` pomodoro
+ported to a web page that behaves and looks like the terminal one. It has its
+own CLAUDE.md, and the rule there is that `focus` is the source of truth for
+every behaviour, so the two change together.
+
 ## Conventions
 
 - Scripts should have a usage comment or `--help` flag

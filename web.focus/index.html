@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>focus — name a goal, then count 25 minutes down against it</title>
+<meta name="description" content="The focus pomodoro, in a browser: name what the block is for, watch the clock run it down over an ASCII scene, and keep the record in your Bang Labs account.">
+<meta name="colour-scheme" content="dark">
+<meta name="theme-color" content="#0a0e17">
+<meta property="og:title" content="focus">
+<meta property="og:description" content="Name a goal, then count 25 minutes down against it.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230a0e17'/><rect x='6' y='14' width='20' height='4' rx='2' fill='%236366f1'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script src="config.js"></script>
+</head>
+<body>
+  <div id="terminal" aria-live="polite">
+    <div id="scrollback"></div>
+    <pre id="alt" aria-hidden="true"></pre>
+  </div>
+
+  <!-- Ten characters of the terminal's own font: the cell size is measured
+       off this, so the grid matches whatever the browser actually renders. -->
+  <span id="probe" aria-hidden="true">0000000000</span>
+
+  <!-- Every keystroke arrives through here, which is also what brings up a
+       keyboard on a phone. -->
+  <input id="keys" autocomplete="off" autocapitalize="off" autocorrect="off"
+         spellcheck="false" aria-label="focus command line">
+
+  <noscript>
+    <p class="noscript">focus is a clock: it needs JavaScript to run one.
+      The command-line original does not —
+      <a href="https://github.com/AdamBK">toolkit/focus</a>.</p>
+  </noscript>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

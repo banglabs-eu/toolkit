@@ -31,8 +31,6 @@ block takes a random one unless -t or $FOCUS_THEME says otherwise:
     space      a twinkling starfield past a ringed planet, with rockets,
                satellites and comets going through
     galaxy     a spiral galaxy turning slowly against the field
-    jungle     canopy and hanging vines, parrots and butterflies, with a
-               monkey swinging past or a snake crossing the undergrowth
     desert     dunes under a blazing sun, an oasis, a vulture circling, and
                camel caravans walking the crest
     farm       barn, silo and turning windmill, hens pecking round the
@@ -56,9 +54,16 @@ Your birthday outranks the lot: on the day, random draws nothing else. focus
 asks for your name and birthday once, keeps them in ~/focus/profile.json, and
 --me changes them. -t names any of these any day of the year.
 
-`-t plain` is the way back to a bare clock; random never picks it.
+`-t plain` is the way back to a bare clock; random never picks it, and t
+walks through the lot in the order above, plain included.
 
-While it runs:  space pauses and resumes, q stops early, Ctrl-C does the same.
+While it runs:  space pauses and resumes, t changes the scene and names it,
+q stops early, Ctrl-C does the same.
+
+The bottom right corner keeps the GlyphClock reading: the glyph standing for
+this 90-minute block of the UTC day, one copy for the first half hour of it,
+two for the second, three for the last. It is the same reading on every
+machine in the world — glyphclock.bang-labs.eu.
 
 A block that runs to zero ends on six seconds of celebration — fireworks, a
 shockwave or confetti, drawn at random over the theme, with DONE across the
@@ -103,7 +108,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 DEFAULT_MINUTES = 25
 FRAME = 0.1                        # seconds between redraws, so scenes animate
@@ -157,6 +162,19 @@ GLYPHS = {
 }
 GLYPH_ROWS = 5
 
+# GlyphClock: the 1440 minutes from UTC midnight cut into 16 blocks of 90, a
+# glyph to each, and each block into three turns of 30 shown as one, two or
+# three copies of it. Same reading everywhere, no timezone. See
+# glyphclock.bang-labs.eu.
+GLYPH_EMOJI = ("🥐", "🦋", "🌷", "☂️",
+               "🌵", "🎈", "👓", "⚓",
+               "🦚", "🤖", "⭐", "☁️",
+               "🌲", "🪁", "🪑", "♻")
+GLYPH_NAMES = ("croissant", "butterfly", "tulip", "umbrella",
+               "cactus", "balloon", "glasses", "anchor",
+               "peacock", "robot", "star", "cloud",
+               "tree", "kite", "chair", "recycle")
+
 # Turning a sprite round: reverse each line, then swap the characters that
 # have a handedness. Every sprite below is drawn facing right.
 _FLIP = {"(": ")", ")": "(", "[": "]", "]": "[", "{": "}", "}": "{",
@@ -189,6 +207,15 @@ def clock(seconds):
     if seconds >= 3600:
         return "%d:%02d:%02d" % (seconds // 3600, seconds % 3600 // 60, seconds % 60)
     return "%02d:%02d" % (seconds // 60, seconds % 60)
+
+
+def glyphclock(moment=None):
+    """The GlyphClock reading now: the block's glyph, how many, and its name."""
+    moment = moment or datetime.now(timezone.utc)
+    minute = moment.hour * 60 + moment.minute
+    block = min(minute // 90, 15)
+    turn = min(minute % 90 // 30, 2)
+    return GLYPH_EMOJI[block], turn + 1, GLYPH_NAMES[block]
 
 
 def line(x0, y0, x1, y1):
@@ -848,143 +875,6 @@ class Space(Theme):
         self._traffic(canvas, dt, now, cols, rows)
 
 
-class Jungle(Theme):
-    name = "jungle"
-    blurb = "canopy and hanging vines, parrots, butterflies, a monkey now and then"
-
-    DARK = rgb(35, 110, 55)
-    LEAF = rgb(70, 160, 80)
-    VINE = rgb(95, 145, 70)
-    SCRUB = rgb(55, 130, 70)
-    MONKEY = rgb(150, 110, 70)
-    SNAKE = rgb(120, 180, 75)
-    WINGS = [rgb(230, 80, 70), rgb(240, 200, 80), rgb(90, 150, 230)]
-    FLUTTER = [rgb(215, 120, 210), rgb(120, 205, 210)]
-
-    BIRD = [["~^~"], ["~v~"]]
-    MOTH = [[">|<"], ["}|{"]]
-    APE = [" |", "(o.o)", " /\\"]
-
-    def __init__(self):
-        Theme.__init__(self)
-        self.canopy, self.vines, self.scrub = [], [], []
-        self.grown = 0
-        self.birds, self.moths = [], []
-        self.next_bird = 0.0
-        self.next_moth = 0.0
-        self.visitor = None
-        self.next_visitor = 30.0
-        self.started = None
-
-    def _grow(self, cols, rows):
-        if cols == self.grown:
-            return
-        self.grown = cols
-        self.canopy = [random.randint(0, 2) for _ in range(cols)]
-        self.vines = []
-        for x in range(1, cols - 1, 11):
-            if random.random() < 0.75:
-                self.vines.append((x + random.randint(0, 7),
-                                   random.randint(3, max(4, rows // 2)),
-                                   random.uniform(0, 6.3), random.uniform(0.5, 1.1)))
-        self.scrub = [random.choice("vVw^") if random.random() < 0.22 else " "
-                      for _ in range(cols)]
-
-    def _leaves(self, canvas, now, cols):
-        for x, depth in enumerate(self.canopy):
-            sway = int(round(math.sin(now * 0.7 + x * 0.22)))
-            for y in range(depth):
-                edge = y == depth - 1
-                canvas.put(x + (sway if edge else 0), y, "%&*^"[(x + y) % 4],
-                           self.LEAF if edge else self.DARK)
-
-    def _hang(self, canvas, now):
-        for x, length, phase, speed in self.vines:
-            for i in range(length):
-                swing = math.sin(now * speed + phase) * (i / length) * 2.5
-                canvas.put(x + int(round(swing)), self.canopy[min(x, len(self.canopy) - 1)] + i,
-                           "|" if i % 5 else "o", self.VINE)
-
-    def _floor(self, canvas, rows):
-        canvas.put(0, rows - 1, "".join(self.scrub), self.SCRUB)
-
-    def _wildlife(self, canvas, dt, now, cols, rows):
-        if now >= self.next_bird and len(self.birds) < 3:
-            heading = random.choice((-1, 1))
-            bird = Sprite(self.BIRD[0], random.choice(self.WINGS),
-                          -4 if heading > 0 else cols + 2,
-                          random.randint(2, max(2, rows // 2)),
-                          heading * random.uniform(6.0, 12.0))
-            self.birds.append(bird)
-            self.next_bird = now + random.uniform(4.0, 11.0)
-        for bird in self.birds:
-            bird.art = self.BIRD[int(now * 6) % 2]
-        self.advance(canvas, self.birds, dt, cols)
-
-        if now >= self.next_moth and len(self.moths) < 4:
-            heading = random.choice((-1, 1))
-            self.moths.append(Sprite(self.MOTH[0], random.choice(self.FLUTTER),
-                                     -3 if heading > 0 else cols + 2,
-                                     random.randint(1, max(1, rows - 3)),
-                                     heading * random.uniform(1.5, 3.5)))
-            self.next_moth = now + random.uniform(3.0, 9.0)
-        for moth in self.moths:
-            moth.art = self.MOTH[int(now * 7) % 2]
-            moth.vy = math.sin(now * 3.0 + moth.x) * 1.6
-        self.advance(canvas, self.moths, dt, cols, rows)
-
-    def _visitor(self, canvas, dt, now, cols, rows):
-        """A monkey swinging off a vine, or a snake crossing the undergrowth."""
-        if self.visitor is None:
-            if now < self.next_visitor:
-                return
-            if random.random() < 0.5:
-                self.visitor = Sprite(self.APE, self.MONKEY,
-                                      random.randint(6, max(6, cols - 10)), 4,
-                                      random.uniform(-2.0, 2.0), 0.0, kind="monkey")
-            else:
-                heading = random.choice((-1, 1))
-                self.visitor = Sprite([""], self.SNAKE,
-                                      -14 if heading > 0 else cols + 14, rows - 2,
-                                      heading * random.uniform(4.0, 7.0), 0.0, kind="snake")
-            self.visitor.born = now
-
-        guest = self.visitor
-        guest.move(dt)
-        if guest.kind == "monkey":
-            swing = math.sin((now - guest.born) * 1.8) * 6
-            top = self.canopy[min(int(guest.x), len(self.canopy) - 1)] if self.canopy else 1
-            for y in range(top, int(guest.y)):           # the vine it swings from
-                canvas.put(guest.x + 1 + int(round(swing * (y - top) / max(1, guest.y - top))),
-                           y, "|", self.VINE)
-            canvas.sprite(guest.x + int(round(swing)), guest.y, guest.art, guest.tint)
-            gone = guest.x < -8 or guest.x > cols + 8
-        else:
-            length = 12
-            head = "><"[guest.vx > 0] if False else (">" if guest.vx > 0 else "<")
-            for i in range(length):
-                x = guest.x - i if guest.vx > 0 else guest.x + i
-                canvas.put(x, rows - 2 + int(round(math.sin(now * 4 + i * 0.7) * 0.5)),
-                           head if i == 0 else "~", self.SNAKE)
-            gone = guest.x - length > cols if guest.vx > 0 else guest.x + length < 0
-        if gone:
-            self.visitor = None
-            self.next_visitor = now + random.uniform(40.0, 90.0)
-
-    def draw(self, canvas, now):
-        dt = self.tick(now)
-        cols, rows = canvas.cols, canvas.rows
-        if self.started is None:
-            self.started = now
-            self.next_visitor = now + random.uniform(20.0, 45.0)
-        self._grow(cols, rows)
-        self._leaves(canvas, now, cols)
-        self._hang(canvas, now)
-        self._floor(canvas, rows)
-        self._wildlife(canvas, dt, now, cols, rows)
-        self._visitor(canvas, dt, now, cols, rows)
-
-
 class Farm(Theme):
     name = "farm"
     blurb = "barn, silo and turning windmill, hens in the yard, a tractor going by"
@@ -1175,8 +1065,18 @@ class Neurons(Theme):
         self.pulses, self.lit = [], {}
         self.next_spark = 0.0
 
+    @staticmethod
+    def _gap(here, there):
+        """Distance between two cells, with rows counted double.
+
+        A cell is about twice as tall as it is wide, so plain coordinates call
+        a cable two rows up shorter than one four columns across when it is
+        drawn longer.
+        """
+        return (there[0] - here[0]) ** 2 + ((there[1] - here[1]) * 2) ** 2
+
     def _wire(self, cols, rows):
-        """Scatter cells, then wire each to its two nearest neighbours."""
+        """Scatter cells, wire each to its two nearest, then join up the rest."""
         self.size = (cols, rows)
         self.cells, self.wires, self.pulses, self.lit = [], [], [], {}
         tries = 0
@@ -1188,14 +1088,55 @@ class Neurons(Theme):
         seen = set()
         for i, cell in enumerate(self.cells):
             def span(j, here=cell):
-                return (self.cells[j][0] - here[0]) ** 2 + ((self.cells[j][1] - here[1]) * 2) ** 2
+                return self._gap(here, self.cells[j])
             for j in sorted(range(len(self.cells)), key=span)[1:3]:
                 pair = (min(i, j), max(i, j))
                 if pair in seen or span(j) > 34 ** 2:    # no cables across the whole net
                     continue
                 seen.add(pair)
-                self.wires.append((i, j, line(cell[0], cell[1],
-                                              self.cells[j][0], self.cells[j][1])))
+                self._cable(i, j, seen)
+        self._join(seen)
+
+    def _cable(self, i, j, seen):
+        seen.add((min(i, j), max(i, j)))
+        self.wires.append((i, j, line(self.cells[i][0], self.cells[i][1],
+                                      self.cells[j][0], self.cells[j][1])))
+
+    def _join(self, seen):
+        """Wire the islands together, until the net is one net.
+
+        Nearest neighbours alone leave clusters, and sometimes a cell with
+        nothing on it at all: a pulse started in one of them could never reach
+        the others, so half the screen sits dark for the whole block. This
+        takes the two closest cells that are not yet connected and cables
+        them, over and over, until every cell can be reached from every other.
+        A joining cable ignores the length limit above — a long dendrite is
+        better than a piece of the net nothing ever lights.
+        """
+        home = list(range(len(self.cells)))
+
+        def root(i):
+            while home[i] != i:
+                home[i] = home[home[i]]              # flatten as we go
+                i = home[i]
+            return i
+
+        for a, b, _ in self.wires:
+            home[root(a)] = root(b)
+        while True:
+            nearest = None
+            for i in range(len(self.cells)):
+                for j in range(i + 1, len(self.cells)):
+                    if root(i) == root(j):
+                        continue
+                    gap = self._gap(self.cells[i], self.cells[j])
+                    if nearest is None or gap < nearest[0]:
+                        nearest = (gap, i, j)
+            if nearest is None:                      # nothing left to join
+                return
+            _, i, j = nearest
+            home[root(i)] = root(j)
+            self._cable(i, j, seen)
 
     def _fire(self, cell, now, spread=True):
         self.lit[cell] = now
@@ -2014,12 +1955,12 @@ class Desert(Theme):
         self._caravan(canvas, dt, now, cols, rows)
 
 
-THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galaxy, Jungle, Desert, Farm,
+THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galaxy, Desert, Farm,
                                   Matrix, Neurons, Haunted, Christmas, Easter,
                                   Birthday)}
 
 
-def compose(canvas, goal, remaining, total, paused, started_at):
+def compose(canvas, goal, remaining, total, paused, started_at, naming=None):
     """The goal, the clock, the bar and the hint, centred over whatever scene."""
     cols, rows = canvas.cols, canvas.rows
     tint = AMBER if paused or remaining <= 60 else ACCENT
@@ -2036,8 +1977,9 @@ def compose(canvas, goal, remaining, total, paused, started_at):
 
     length = "%g min" % (total / 60) if total % 60 else "%d min" % (total // 60)
     state = "paused" if paused else "started " + started_at.strftime("%H:%M")
-    keys = "space %s · q stop" % ("resume" if paused else "pause")
-    for hint in ("%s · %s · %s" % (length, state, keys), "%s · %s" % (length, keys), keys):
+    keys = "space %s · t theme · q stop" % ("resume" if paused else "pause")
+    for hint in ("%s · %s · %s" % (length, state, keys), "%s · %s" % (length, keys),
+                 keys, "space · t · q"):          # the last one fits anything
         if len(hint) <= cols - 2:
             break
 
@@ -2054,6 +1996,44 @@ def compose(canvas, goal, remaining, total, paused, started_at):
         for text, seg_tint in segments:
             canvas.put(x, top + i, text, seg_tint, opaque=True)
             x += len(text)
+
+    below = top + len(lines)
+    taken = corner(canvas, below)
+    if naming:
+        label(canvas, naming, below, canvas.cols - 4 - taken)
+
+
+def corner(canvas, below):
+    """The GlyphClock reading, dim in the bottom right, out of the clock's way.
+
+    A glyph is one character here but two cells on the screen, so each is padded
+    out to the width it will take and nothing downstream of it shifts. The name
+    rides along for terminals whose font draws a box instead of a croissant.
+
+    Returns the columns it took, which is what the corner opposite has left.
+    """
+    row = canvas.rows - 2
+    if row < below:                              # a short window: the clock first
+        return 0
+    emoji, count, name = glyphclock()
+    glyphs = (emoji + " " * (2 - len(emoji))) * count
+    for text in (" %s %s" % (name, glyphs), " " + glyphs):
+        if len(text) + 2 <= canvas.cols:
+            canvas.put(canvas.cols - 2 - len(text), row, text, DIM, opaque=True)
+            return len(text) + 2
+    return 0
+
+
+def label(canvas, name, below, room):
+    """Which scene is running, bottom left, for the seconds after t changed it."""
+    row = canvas.rows - 2
+    if row < below or room < 8:
+        return
+    for text in (" %s \u2014 %s " % (name, THEMES[name].blurb), " %s " % name):
+        if len(text) <= room:
+            canvas.put(1, row, text, DIM, opaque=True)
+            return
+    canvas.put(1, row, " " + name[: room - 3] + "\u2026 ", DIM, opaque=True)
 
 
 def frame(canvas):
@@ -2779,6 +2759,9 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
     paused = False
     resumed_at = time.monotonic()
     old_attrs = None
+    rota = list(THEMES)                    # what t walks through, plain included
+    at = rota.index(theme_name)
+    naming = 0.0                           # until when the scene names itself
 
     if interactive:
         old_attrs = termios.tcgetattr(sys.stdin)
@@ -2797,7 +2780,8 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
                 cols, rows = shutil.get_terminal_size((80, 24))
                 canvas = Canvas(max(20, cols), max(8, rows), colour)
                 theme.draw(canvas, now)
-                compose(canvas, goal, remaining, total, paused, started_at)
+                compose(canvas, goal, remaining, total, paused, started_at,
+                        theme_name if now < naming else None)
                 frame(canvas)
             if remaining <= 0:
                 completed = True
@@ -2819,6 +2803,12 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
                 break
             if key == " ":
                 paused = not paused
+            if key in ("t", "T"):              # the next scene, and it says which
+                at = (at + 1) % len(rota)
+                theme_name = rota[at]
+                theme = THEMES[theme_name]()
+                theme.total = 45.0 if preview else total
+                naming = now + 3.0
     except KeyboardInterrupt:
         pass
     finally:
@@ -3152,7 +3142,8 @@ def main():
         epilog="themes:\n  " + "\n  ".join(
             ["%-9s %s" % (name, theme.blurb) for name, theme in THEMES.items()]
             + ["%-9s %s" % (RANDOM, "one of the above, drawn fresh for each block")]
-        ) + "\n\nspace pauses, q stops early. A finished block asks what comes next:\n"
+        ) + "\n\nspace pauses, t changes the scene, q stops early. A finished block\n"
+          "asks what comes next:\n"
           "f starts a new session, r runs the same goal again, q quits.\n"
           "Sessions are logged to " + LOG_FILE
           + ",\nor to your Bang Labs account once you have run focus --login.",

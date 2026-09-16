@@ -391,10 +391,29 @@ focus --login                  # keep the history in your Bang Labs account
 focus --whoami                 # which account this machine logs to
 ```
 
-While it runs, `space` pauses and resumes, `q` stops early, and `Ctrl-C` does
-the same. The clock turns amber in the last minute. When it reaches zero the
+While it runs, `space` pauses and resumes, `t` changes the scene, `q` stops
+early, and `Ctrl-C` does the same. The clock turns amber in the last minute. When it reaches zero the
 terminal bell rings, a desktop notification fires (`notify-send`) and a chime
 plays (`paplay`), each skipped quietly if not installed.
+
+#### The corner
+
+The bottom right of the window carries the GlyphClock reading, dim, out of the
+countdown's way. The 1440 minutes from UTC midnight are cut into 16 blocks of
+90, each with a glyph of its own, and each block into three turns of 30 shown
+as one, two or three copies of that glyph — so `🌵 🌵` is the second half hour
+of the cactus block, wherever in the world the terminal is sitting. The name
+is printed beside it, both because it is the block's name and because a
+terminal without a colour emoji font draws a box instead.
+
+```
+              25 min · started 14:05 · space pause · q stop
+
+                                                    cactus 🌵 🌵
+```
+
+More at [glyphclock.bang-labs.eu](https://glyphclock.bang-labs.eu). A window
+too short to hold both keeps the countdown and drops the corner.
 
 #### Landing it
 
@@ -437,6 +456,16 @@ Every block draws a random scene behind the clock, a frame every tenth of a
 second. `-t` picks one instead, and `$FOCUS_THEME` changes what the default is —
 set it to `plain` for a bare clock, or to a theme name to stop the lottery.
 Random never draws `plain`. A frame costs between 0.2% and 0.9% of one core.
+
+Pressing `t` during a block changes the scene there and then, and names the new
+one in the bottom left for three seconds. It walks the whole list in order,
+`plain` and the four seasonal scenes included, whatever the date — the block
+keeps running throughout, and the one you land on is the one the session is
+logged under.
+
+```
+  aquarium — fish, seaweed and a smoking volcano             cactus 🌵 🌵
+```
 
 Four themes keep to their dates. Random offers `haunted` only during the
 Monday-to-Sunday week that holds 31 October, `christmas` through December, and
@@ -512,7 +541,6 @@ is stored; the `birthday` theme then simply never comes up on its own.
 | `airport` | terminal and control tower along the bottom, departures rolling out and climbing away, arrivals descending onto the runway, helicopters settling on the apron and lifting off again, tugs, clouds |
 | `space` | a twinkling starfield past a ringed planet, rockets under power, satellites blinking, the odd comet |
 | `galaxy` | a spiral galaxy turning slowly, arms of stars wound round a bright core |
-| `jungle` | canopy and hanging vines, parrots and butterflies, a monkey swinging through or a snake crossing the undergrowth |
 | `desert` | dunes under a blazing sun with heat coming off the crest, an oasis, a circling vulture, and roped caravans of two to four camels walking over the sand |
 | `farm` | barn, silo and turning windmill, hens pecking round the yard, a cow in the field, a tractor going by |
 | `matrix` | glyph rain down every column, bright at the head, fading behind |
@@ -688,6 +716,23 @@ Everything here is still standard library — `urllib`, not `requests`. The
 service on the other end is [`backend.toolkit`](../backend.toolkit); the account is
 `accounts.bang-labs.eu`. `FOCUS_API_URL` and `FOCUS_ACCOUNTS_URL` point either
 somewhere else for local work.
+
+#### In a browser
+
+[`web.focus/`](web.focus) is the same thing as a web page: a terminal with one
+command in it, the same flags typed at a prompt, the same twelve scenes, the
+same finish animation and the same GlyphClock corner. Signed out it keeps the
+record in the browser; `--login` hands over to `accounts.bang-labs.eu` and
+every block after that is written to the same account `focus --history` reads
+here, so a block run on a phone shows up on the desktop.
+
+```bash
+cd web.focus && python3 -m http.server 8080      # http://localhost:8080
+```
+
+It is a port, not a fork: `web.focus/CLAUDE.md` says which file answers to
+which part of this script, and behaviour that differs from the script is a bug
+in the port.
 
 ### backup
 

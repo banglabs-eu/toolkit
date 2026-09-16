@@ -1,0 +1,131 @@
+/* A terminal window, and nothing else on the page.
+ *
+ * Colours come from the Bang Labs design tokens; the type is the one mono
+ * face the rest of the company codes in. Everything is a cell grid, so the
+ * only measurements that matter here are the character box and the gutter. */
+
+:root {
+  --bg-primary: #0a0e17;
+  --text-primary: #eaf0f6;
+  --text-secondary: #7a8ba0;
+  --accent: #6366f1;
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace,
+               'DejaVu Sans Mono', monospace;
+  --gutter: 12px;
+  --cell: 15px;                       /* font size; the grid follows from it */
+  --leading: 1.15;
+}
+
+@media (max-width: 720px) {
+  :root { --cell: 11px; --gutter: 8px; }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--cell);
+  line-height: var(--leading);
+  font-variant-ligatures: none;
+  -webkit-text-size-adjust: 100%;
+}
+
+#terminal {
+  position: fixed;
+  inset: 0;
+  padding: var(--gutter);
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  cursor: text;
+  scrollbar-width: thin;
+  scrollbar-color: #1e293b transparent;
+}
+
+#terminal::-webkit-scrollbar { width: 8px; }
+#terminal::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 4px; }
+
+.line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: calc(var(--cell) * var(--leading));
+}
+
+/* The alternate screen: the whole window, no scrolling, nothing wrapped. */
+#alt {
+  display: none;
+  margin: 0;
+  font: inherit;
+  line-height: var(--leading);
+  white-space: pre;
+  overflow: hidden;
+}
+
+#terminal.alt-on #scrollback { display: none; }
+#terminal.alt-on { overflow: hidden; }
+#terminal.alt-on #alt { display: block; }
+
+.b { font-weight: 700; }
+.d { opacity: 0.55; }
+
+/* A glyph the drawing code counts as one cell and the screen draws as two. */
+.g {
+  display: inline-block;
+  width: 2ch;
+  font-style: normal;
+  text-align: left;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+
+.caret {
+  background: var(--accent);
+  color: var(--bg-primary);
+  animation: blink 1.06s steps(1) infinite;
+}
+
+@keyframes blink {
+  0%, 50% { background: var(--accent); color: var(--bg-primary); }
+  50.01%, 100% { background: transparent; color: inherit; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .caret { animation: none; }
+}
+
+/* Off-screen, but a real focused field: it is what a phone keyboard types
+   into, and what every keystroke is read from. */
+#keys {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  font-size: 16px;                    /* smaller than this and iOS zooms the page */
+  z-index: -1;
+}
+
+#probe {
+  position: absolute;
+  visibility: hidden;
+  white-space: pre;
+  font-family: var(--font-mono);
+  font-size: var(--cell);
+  line-height: var(--leading);
+  top: -100px;
+  left: -1000px;
+}
+
+.noscript {
+  padding: var(--gutter);
+  color: var(--text-secondary);
+}
+
+.noscript a { color: var(--accent); }
