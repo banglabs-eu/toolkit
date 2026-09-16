@@ -62,10 +62,16 @@ same. t opens the scene picker along the bottom: the arrow keys walk the rota
 and draw each one behind the clock as you go, and t, enter or escape leaves it
 where you stopped. The block keeps counting the whole time.
 
+d, in the picker, keeps the scene you are on as the one every block draws from
+now on — it turns green in the strip to say so, and d again drops it and puts
+the lottery back. It is remembered in ~/focus/profile.json; $FOCUS_THEME still
+wins for a shell that sets it, and -t still wins for one block.
+
 The bottom right corner keeps the GlyphClock reading: the glyph standing for
 this 90-minute block of the UTC day, one copy for the first half hour of it,
-two for the second, three for the last. It is the same reading on every
-machine in the world — glyphclock.bang-labs.eu.
+two for the second, three for the last. The glyph is the reading, so it stands
+on its own. It is the same on every machine in the world —
+glyphclock.bang-labs.eu.
 
 A block that runs to zero ends on six seconds of celebration — fireworks, a
 shockwave or confetti, drawn at random over the theme, with DONE across the
@@ -2010,7 +2016,8 @@ THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galax
                                   Birthday)}
 
 
-def compose(canvas, goal, remaining, total, paused, started_at, choosing=None):
+def compose(canvas, goal, remaining, total, paused, started_at, choosing=None,
+            default=None):
     """The goal, the clock, the bar and the hint, centred over whatever scene."""
     cols, rows = canvas.cols, canvas.rows
     tint = AMBER if paused or remaining <= 60 else ACCENT
@@ -2031,8 +2038,8 @@ def compose(canvas, goal, remaining, total, paused, started_at, choosing=None):
         keys = "space %s · t theme · q stop" % ("resume" if paused else "pause")
         short = "space · t · q"
     else:                                  # the picker says how to leave it
-        keys = "← → scene · t, enter or esc to go back"
-        short = "← → · enter"
+        keys = "← → scene · d default · t, enter or esc to go back"
+        short = "← → · d · enter"
     for hint in ("%s · %s · %s" % (length, state, keys), "%s · %s" % (length, keys),
                  keys, short):                        # the last one fits anything
         if len(hint) <= cols - 2:
@@ -2055,37 +2062,38 @@ def compose(canvas, goal, remaining, total, paused, started_at, choosing=None):
     below = top + len(lines)
     taken = corner(canvas, below)
     if choosing is not None:
-        picker(canvas, choosing, below, canvas.cols - 4 - taken)
+        picker(canvas, choosing, below, canvas.cols - 4 - taken, default)
 
 
 def corner(canvas, below):
     """The GlyphClock reading, dim in the bottom right, out of the clock's way.
 
-    A glyph is one character here but two cells on the screen, so each is padded
-    out to the width it will take and nothing downstream of it shifts. The name
-    rides along for terminals whose font draws a box instead of a croissant.
+    The glyph on its own: the picture is the reading, and a name beside it
+    would only be the picture spelled out. A glyph is one character here but
+    two cells on the screen, so each is padded out to the width it will take
+    and nothing downstream of it shifts.
 
     Returns the columns it took, which is what the corner opposite has left.
     """
     row = canvas.rows - 2
     if row < below:                              # a short window: the clock first
         return 0
-    emoji, count, name = glyphclock()
-    glyphs = (emoji + " " * (2 - len(emoji))) * count
-    for text in (" %s %s" % (name, glyphs), " " + glyphs):
-        if len(text) + 2 <= canvas.cols:
-            canvas.put(canvas.cols - 2 - len(text), row, text, DIM, opaque=True)
-            return len(text) + 2
-    return 0
+    emoji, count, _ = glyphclock()
+    text = " " + (emoji + " " * (2 - len(emoji))) * count
+    if len(text) + 2 > canvas.cols:
+        return 0
+    canvas.put(canvas.cols - 2 - len(text), row, text, DIM, opaque=True)
+    return len(text) + 2
 
 
-def picker(canvas, at, below, room):
+def picker(canvas, at, below, room, default=None):
     """The scene rota along the bottom, with the one on screen picked out.
 
     Only as much of it as fits: the list is windowed around the choice and
     grown outwards until the room runs out, with a chevron on whichever side
     still has names behind it. The scene itself is the preview — this is only
-    the label for what is already being drawn.
+    the label for what is already being drawn. The default, if there is one, is
+    the name in green.
     """
     row = canvas.rows - 2
     if room < 12:                      # the GlyphClock has that row; go under it
@@ -2112,7 +2120,9 @@ def picker(canvas, at, below, room):
 
     segments = [("‹" if left > 0 else " ", DIM)]
     for i in range(left, right + 1):
-        segments.append((marked[i], BOLD + ACCENT if i == at else DIM))
+        kept = rota[i] == default
+        segments.append((marked[i], (BOLD if i == at else "")
+                         + (GREEN if kept else ACCENT if i == at else DIM)))
     segments.append(("›" if right < len(rota) - 1 else " ", DIM))
 
     x = 1
@@ -2355,6 +2365,33 @@ def save_profile(profile):
         fh.write("\n")
 
 
+def default_scene():
+    """The scene every block draws unless something says otherwise.
+
+    $FOCUS_THEME first, for a shell that wants one session to differ, then
+    whatever d last kept in the profile, then the lottery.
+    """
+    name = os.environ.get("FOCUS_THEME") or load_profile().get("theme") or RANDOM
+    return name if name == RANDOM or name in THEMES else RANDOM
+
+
+def keep_default(name):
+    """Keep this scene as the default, or drop it if it already is.
+
+    Pressing d on the scene that is already the default is how you get the
+    lottery back, so the one key both sets and clears. Returns what the
+    default is now, or None for random.
+    """
+    profile = load_profile()
+    if profile.get("theme") == name:
+        profile.pop("theme", None)
+        name = None
+    else:
+        profile["theme"] = name
+    save_profile(profile)
+    return name
+
+
 def parse_birthday(text):
     """Day first, as it is written here: 7-3, 07/03, 7.3.1985, or an ISO date."""
     for separator in "-/.,":
@@ -2391,6 +2428,9 @@ def ask_profile(force=False):
         return profile
 
     profile = {"asked": True, "name": name}
+    kept = load_profile().get("theme")     # the picker's d put it there; leave it
+    if kept:
+        profile["theme"] = kept
     when = parse_birthday(born) if born else None
     if born and when is None:
         print("  Sorry, I could not read that date. Run focus --me to try again.")
@@ -2847,6 +2887,7 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
     rota = list(THEMES)                    # what the picker walks, plain included
     at = rota.index(theme_name)
     picking = False                        # is the rota on screen?
+    default = load_profile().get("theme")  # marked green in the strip
 
     def scene(index):
         """The theme at that place in the rota, ready to draw."""
@@ -2872,7 +2913,7 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
                 canvas = Canvas(max(20, cols), max(8, rows), colour)
                 theme.draw(canvas, now)
                 compose(canvas, goal, remaining, total, paused, started_at,
-                        at if picking else None)
+                        at if picking else None, default)
                 frame(canvas)
             if remaining <= 0:
                 completed = True
@@ -2895,6 +2936,8 @@ def countdown(goal, minutes, theme_name=RANDOM, preview=False, finale=True):
                     at = (at + (1 if key in ("right", "down") else -1)) % len(rota)
                     theme_name = rota[at]
                     theme = scene(at)
+                elif key in ("d", "D"):        # this one, from now on
+                    default = keep_default(rota[at])
                 elif key in ("t", "T", "\r", "\n", "\x1b", "q", "Q"):
                     picking = False            # q closes the rota, it does not stop
                 elif key == " ":
@@ -3228,10 +3271,7 @@ def show_log(limit):
 
 
 def main():
-    default_theme = os.environ.get("FOCUS_THEME", RANDOM)
-    if default_theme not in THEMES and default_theme != RANDOM:
-        default_theme = RANDOM
-
+    default_theme = default_scene()
     parser = argparse.ArgumentParser(
         prog="focus",
         description="Name a goal, then count %d minutes down against it." % DEFAULT_MINUTES,
@@ -3240,7 +3280,8 @@ def main():
             ["%-9s %s" % (name, theme.blurb) for name, theme in THEMES.items()]
             + ["%-9s %s" % (RANDOM, "one of the above, drawn fresh for each block")]
         ) + "\n\nspace pauses, q stops early, t opens the scene picker: the arrows\n"
-          "walk it, t, enter or escape leave it. A finished block\n"
+          "walk it, d keeps one as the default, t, enter or escape leave it.\n"
+          "A finished block\n"
           "asks what comes next:\n"
           "f starts a new session, r runs the same goal again, q quits.\n"
           "Sessions are logged to " + LOG_FILE
@@ -3251,8 +3292,8 @@ def main():
                         help="length of the countdown (default: %d)" % DEFAULT_MINUTES)
     parser.add_argument("-t", "--theme", choices=sorted(THEMES) + [RANDOM],
                         default=default_theme,
-                        help="scene behind the clock (default: %s, $FOCUS_THEME)"
-                             % default_theme)
+                        help="scene behind the clock (default: %s — d in the "
+                             "picker, or $FOCUS_THEME)" % default_theme)
     parser.add_argument("-p", "--preview", metavar="THEME",
                         choices=sorted(THEMES) + [RANDOM], nargs="?", const=default_theme,
                         help="watch a theme run, logging nothing; q to leave")

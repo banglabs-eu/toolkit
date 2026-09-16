@@ -40,12 +40,18 @@ over. `--help` prints the list.
 | `--me` | the name and birthday the birthday scene uses |
 | `--login` / `--logout` / `--whoami` | the account the blocks go to |
 | `--sync` / `--upload` | send what is waiting, or what predates the account |
-| `--default-theme matrix` | what `$FOCUS_THEME` is to the script |
+| `--default-theme matrix` | the same default `d` sets in the picker |
 | `clear` | empty the scrollback |
 
+The page opens on `Goal:`, the way `focus` with no arguments does. Enter on
+its own gives you the `$ focus` command line instead, and a flag typed at the
+goal prompt is read as one.
+
 While a block runs: `space` pauses, `t` opens the scene picker — the arrow
-keys walk the rota, each scene drawn behind the clock as you reach it, and
-`t`, `enter` or `escape` goes back to the block — and `q` stops early. A block that reaches zero rings, draws six seconds of fireworks,
+keys walk the rota, each scene drawn behind the clock as you reach it, `d`
+keeps the one you are on as the default (green in the strip, `d` again clears
+it), and `t`, `enter` or `escape` goes back to the block — and `q` stops
+early. A block that reaches zero rings, draws six seconds of fireworks,
 a shockwave or confetti, and then asks what comes next — `f` new session, `r`
 the same goal again, `q` quit. Up and down walk back through what you typed.
 

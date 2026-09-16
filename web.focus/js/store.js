@@ -24,6 +24,7 @@ for (const key of ["api", "accounts"]) {
 const SESSIONS = "focus.sessions";
 const PENDING = "focus.pending";
 const PROFILE = "focus.profile";
+const THEME = "focus.theme";
 const ACCOUNT = "focus.account";           // a hint only; the cookie is the truth
 const BATCH = 500;                         // blocks per upload, so a long history pages
 
@@ -60,6 +61,23 @@ export function loadProfile() {
 
 export function saveProfile(profile) {
   write(PROFILE, profile);
+}
+
+/** The scene every block draws unless something says otherwise, or null. */
+export function defaultScene() {
+  return read(THEME, null);
+}
+
+/** Keep this scene as the default, or drop it if it already is.
+ *
+ * Pressing d on the scene that is already the default is how the lottery
+ * comes back, so the one key both sets and clears. Returns what the default
+ * is now, or null for random.
+ */
+export function keepDefault(name) {
+  const next = defaultScene() === name ? null : name;
+  write(THEME, next);
+  return next;
 }
 
 /* --- time, written the way the CSV writes it -------------------------------- */

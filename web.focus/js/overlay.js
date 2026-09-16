@@ -19,7 +19,7 @@ export const SPARKS = [rgb(255, 215, 95), rgb(255, 125, 90), rgb(120, 220, 255),
 
 /** The goal, the clock, the bar and the hint, centred over whatever scene. */
 export function compose(canvas, goal, remaining, total, paused, startedAt,
-                        choosing = null) {
+                        choosing = null, standing = null) {
   const cols = canvas.cols, rows = canvas.rows;
   const tint = (paused || remaining <= 60) ? AMBER : ACCENT;
 
@@ -37,8 +37,8 @@ export function compose(canvas, goal, remaining, total, paused, startedAt,
   let keys = `space ${paused ? "resume" : "pause"} · t theme · q stop`;
   let short = "space · t · q";
   if (choosing !== null) {                    // the picker says how to leave it
-    keys = "← → scene · t, enter or esc to go back";
-    short = "← → · enter";
+    keys = "← → scene · d default · t, enter or esc to go back";
+    short = "← → · d · enter";
   }
   let hint = keys;
   for (const option of [`${length} · ${state} · ${keys}`, `${length} · ${keys}`,
@@ -65,29 +65,26 @@ export function compose(canvas, goal, remaining, total, paused, startedAt,
 
   const below = top + lines.length;
   const taken = corner(canvas, below);
-  if (choosing !== null) picker(canvas, choosing, below, cols - 4 - taken);
+  if (choosing !== null) picker(canvas, choosing, below, cols - 4 - taken, standing);
 }
 
 /** The GlyphClock reading, dim in the bottom right, out of the clock's way.
  *
- * A glyph is one cell here but two on the screen, so each is padded out to the
- * width it will take and nothing downstream of it shifts. The name rides along
- * for anywhere without a colour emoji font.
+ * The glyph on its own: the picture is the reading, and a name beside it would
+ * only be the picture spelled out. A glyph is one cell here but two on the
+ * screen, so each is padded out to the width it will take and nothing
+ * downstream of it shifts.
  *
  * Returns the columns it took, which is what the corner opposite has left.
  */
 export function corner(canvas, below) {
   const row = canvas.rows - 2;
   if (row < below) return 0;                    // a short window: the clock first
-  const { emoji, count, name } = glyphclock();
-  const glyphs = (emoji + " ".repeat(Math.max(0, 2 - width(emoji)))).repeat(count);
-  for (const text of [` ${name} ${glyphs}`, " " + glyphs]) {
-    if (width(text) + 2 <= canvas.cols) {
-      canvas.put(canvas.cols - 2 - width(text), row, text, DIM, true);
-      return width(text) + 2;
-    }
-  }
-  return 0;
+  const { emoji, count } = glyphclock();
+  const text = " " + (emoji + " ".repeat(Math.max(0, 2 - width(emoji)))).repeat(count);
+  if (width(text) + 2 > canvas.cols) return 0;
+  canvas.put(canvas.cols - 2 - width(text), row, text, DIM, true);
+  return width(text) + 2;
 }
 
 /** The scene rota along the bottom, with the one on screen picked out.
@@ -95,9 +92,10 @@ export function corner(canvas, below) {
  * Only as much of it as fits: the list is windowed around the choice and grown
  * outwards until the room runs out, with a chevron on whichever side still has
  * names behind it. The scene itself is the preview — this is only the label
- * for what is already being drawn.
+ * for what is already being drawn. The default, if there is one, is the name
+ * in green.
  */
-export function picker(canvas, at, below, room) {
+export function picker(canvas, at, below, room, standing = null) {
   let row = canvas.rows - 2;
   if (room < 12) {                            // the GlyphClock has that row
     row = canvas.rows - 1;
@@ -125,7 +123,9 @@ export function picker(canvas, at, below, room) {
 
   const segments = [[left > 0 ? "‹" : " ", DIM]];
   for (let i = left; i <= right; i++) {
-    segments.push([marked[i], i === at ? BOLD + ACCENT : DIM]);
+    const kept = rota[i] === standing;
+    segments.push([marked[i], (i === at ? BOLD : "")
+      + (kept ? GREEN : i === at ? ACCENT : DIM)]);
   }
   segments.push([right < rota.length - 1 ? "›" : " ", DIM]);
 

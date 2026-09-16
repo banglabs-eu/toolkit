@@ -13,12 +13,12 @@ import {
   ACCENT, AMBER, BOLD, DIM, padEnd,
 } from "./util.js";
 import {
-  ApiError, CONFIG, accountName, countLocal, flush, loadProfile, loginUrl,
-  logout, saveProfile, signedIn, uploadLocal, waiting, whoami,
+  ApiError, CONFIG, accountName, countLocal, defaultScene, flush, keepDefault,
+  loadProfile, loginUrl, logout, saveProfile, signedIn, uploadLocal, waiting,
+  whoami,
 } from "./store.js";
 
 const DEFAULT_MINUTES = 25;
-const THEME_KEY = "focus.theme";           // what $FOCUS_THEME is to the script
 const SIGNING_IN = "focus.signingin";
 
 /* --- the command line -------------------------------------------------------- */
@@ -109,8 +109,9 @@ function unknownTheme(name) {
     + [...THEMES.keys(), RANDOM].join(", ") + ".";
 }
 
+/** What d in the picker last kept, as long as it is still a scene. */
 function defaultTheme() {
-  const kept = localStorage.getItem(THEME_KEY);
+  const kept = defaultScene();
   return kept && (kept === RANDOM || THEMES.has(kept)) ? kept : RANDOM;
 }
 
@@ -119,7 +120,8 @@ function defaultTheme() {
 function greet(term) {
   term.write([["focus", BOLD + ACCENT],
               [" — name a goal, then count 25 minutes down against it.", ""]]);
-  term.write([["Type what the block is for and press enter. --help lists the rest.", DIM]]);
+  term.write([["Type what the block is for and press enter. Enter on its own gives the", DIM]]);
+  term.write([["command line, where --help lists the rest.", DIM]]);
   term.write();
 }
 
@@ -136,7 +138,7 @@ function help(term) {
     ["--me", "set the name and birthday it greets you by"],
     ["--login", "keep the history in your Bang Labs account"],
     ["--whoami", "which account this browser logs to"],
-    ["--default-theme matrix", "stop the lottery; random puts it back"],
+    ["--default-theme matrix", "stop the lottery; d in the picker does it too"],
     ["clear", "empty the scrollback"],
   ];
   for (const [command, what] of lines) {
@@ -151,7 +153,8 @@ function help(term) {
               ["one of the above, drawn fresh for each block", DIM]]);
   term.write();
   term.write([["While a block runs: space pauses, q stops early, and t opens the scene", DIM]]);
-  term.write([["picker: the arrows walk it, t, enter or escape go back to the block.", DIM]]);
+  term.write([["picker: the arrows walk it, d keeps the one you are on as the default,", DIM]]);
+  term.write([["and t, enter or escape go back to the block.", DIM]]);
   term.write([["A finished block asks what comes next: f new session, r again, q quit.", DIM]]);
   term.write([["The bottom right corner carries the GlyphClock reading — "
     + "glyphclock.bang-labs.eu.", DIM]]);
@@ -310,10 +313,14 @@ async function run(term, text) {
         term.write([[unknownTheme(name), AMBER]]);
         return;
       }
-      localStorage.setItem(THEME_KEY, name);
-      term.write(name === RANDOM
-        ? "Back to a fresh scene every block."
-        : `Every block draws ${name} from now on. --default-theme random puts the lottery back.`);
+      if (name === RANDOM) {
+        if (defaultScene()) keepDefault(defaultScene());   // clears it
+        term.write("Back to a fresh scene every block.");
+      } else {
+        if (defaultScene() !== name) keepDefault(name);
+        term.write(`Every block draws ${name} from now on. `
+          + "d in the picker, or --default-theme random, puts the lottery back.");
+      }
       return;
     }
 
@@ -403,6 +410,22 @@ async function main() {
   if (signedIn() && waiting()) await flush().catch(() => {});
 
   await askProfile(term);
+
+  // `focus` with no arguments asks for the goal before anything else, and so
+  // does this: the command line is what enter on its own gives you.
+  const first = (await term.readLine("Goal: ")).trim();
+  if (first && !first.startsWith("-")) {
+    const plan = parse("");                 // the defaults, as `focus` with no flags
+    plan.goal = [first];                    // the goal prompt takes the line as it is
+    await block(term, plan);
+    term.write();
+  } else if (first) {
+    await run(term, first);                 // a flag typed at the goal prompt
+    term.write();
+  } else {
+    term.write([["A block needs a goal. Nothing started.", AMBER]]);
+    term.write();
+  }
 
   for (;;) {
     const text = await term.readLine("$ focus ", { history: true });

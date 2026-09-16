@@ -403,14 +403,13 @@ The bottom right of the window carries the GlyphClock reading, dim, out of the
 countdown's way. The 1440 minutes from UTC midnight are cut into 16 blocks of
 90, each with a glyph of its own, and each block into three turns of 30 shown
 as one, two or three copies of that glyph — so `🌵 🌵` is the second half hour
-of the cactus block, wherever in the world the terminal is sitting. The name
-is printed beside it, both because it is the block's name and because a
-terminal without a colour emoji font draws a box instead.
+of the cactus block, wherever in the world the terminal is sitting. The glyph
+is the whole reading; naming it would only be the picture spelled out.
 
 ```
-              25 min · started 14:05 · space pause · q stop
+    25 min · started 14:05 · space pause · t theme · q stop
 
-                                                    cactus 🌵 🌵
+                                                          🌵 🌵
 ```
 
 More at [glyphclock.bang-labs.eu](https://glyphclock.bang-labs.eu). A window
@@ -467,10 +466,16 @@ and the four seasonal scenes whatever the date, it scrolls when the window is
 too narrow for all of it, and the clock counts down the whole time. The scene
 you finish on is the one the session is logged under.
 
+`d` keeps the scene you are on as the one every block draws from now on. It
+turns green in the strip to say so, and `d` again drops it and puts the lottery
+back. It lives in `~/focus/profile.json`, so it is there the next time you run
+`focus` at all; `$FOCUS_THEME` still wins for a shell that sets it, and `-t`
+still wins for one block.
+
 ```
    plain  aquarium  airport [space] galaxy  desert  farm  matrix  neurons ›
 
-  25 min · started 14:05 · ← → scene · t, enter or esc to go back
+  25 min · started 14:05 · ← → scene · d default · t, enter or esc to go back
 ```
 
 Four themes keep to their dates. Random offers `haunted` only during the

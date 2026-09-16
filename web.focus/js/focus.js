@@ -6,7 +6,7 @@ import {
   FINALE, FINALES, FRAME, Finale, banner, compose,
 } from "./overlay.js";
 import { DIM, ESC, ETX, GREEN, choice, hhmm, mod, number } from "./util.js";
-import { record } from "./store.js";
+import { defaultScene, keepDefault, record } from "./store.js";
 
 /** The clock the animation runs on: seconds, monotonic, never jumping back. */
 function ticking() {
@@ -116,6 +116,7 @@ export async function countdown(term, goal, minutes, themeName,
   const rota = [...THEMES.keys()];             // what the picker walks, plain included
   let at = rota.indexOf(themeName);
   let picking = false;                         // is the rota on screen?
+  let standing = defaultScene();               // marked green in the strip
   let completed = false;
   let stopped = false;
 
@@ -133,6 +134,8 @@ export async function countdown(term, goal, minutes, themeName,
         at = mod(at + (key === "right" || key === "down" ? 1 : -1), rota.length);
         themeName = rota[at];
         theme = scene(at);
+      } else if (key === "d" || key === "D") {   // this one, from now on
+        standing = keepDefault(rota[at]);
       } else if (["t", "T", "\r", ESC, ETX, "q", "Q"].includes(key)) {
         picking = false;                       // q closes the rota, it does not stop
       } else if (key === " ") {
@@ -161,7 +164,7 @@ export async function countdown(term, goal, minutes, themeName,
         const canvas = new Canvas(term.cols, term.rows);
         theme.draw(canvas, now);
         compose(canvas, goal, remaining, total, paused, startedAt,
-                picking ? at : null);
+                picking ? at : null, standing);
         term.frame(canvas);
       }
       if (remaining <= 0) {
