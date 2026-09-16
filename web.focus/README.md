@@ -86,6 +86,30 @@ A cookie ignores ports, so a local accounts on `:8010` signs you in to a local
 toolkit API on `:8014` with no further ceremony — as long as both list
 `http://localhost:8080` in `ALLOWED_ORIGINS`.
 
+## Deploying it
+
+It runs at [focus.bang-labs.eu](https://focus.bang-labs.eu): an nginx image on
+the Hetzner box, on `127.0.0.1:8016`, behind the same Cloudflare Tunnel as
+every other Bang Labs service. `8014` is `backend.toolkit` prod and `8015` is
+reserved for its dev env, so the three never collide.
+
+```bash
+# On the box, from ~/Bang-Labs/toolkit on main:
+cd web.focus && ./deploy-main.sh
+```
+
+The script refuses a dirty tree or a branch that is not `main`, builds the
+image tagged with the commit, brings it up as the `focus-web-prod` compose
+project and checks `/healthz`. The page is baked into the image, so a deploy
+is a build; a rollback is `docker run` on an older tag.
+
+Sign-in needs two more things, both already done and both worth knowing about
+if this ever moves: `focus.bang-labs.eu` must be in `ALLOWED_ORIGINS` on
+**accounts** and on **backend.toolkit**, and the hostname has to stay one level
+under `bang-labs.eu` — Cloudflare's free Universal SSL only covers
+`*.bang-labs.eu`, so `focus.tools.bang-labs.eu` would fail its TLS handshake
+before it ever reached the tunnel.
+
 ## How it is put together
 
 ```

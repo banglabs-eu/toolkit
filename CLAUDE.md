@@ -13,6 +13,12 @@ ported to a web page that behaves and looks like the terminal one. It has its
 own CLAUDE.md, and the rule there is that `focus` is the source of truth for
 every behaviour, so the two change together.
 
+`focus` remains the command-line entry point and interactive display layer.
+Its account/session persistence is in `focuslib/account.py`; its `--log`
+and `--history` reporting is in `focuslib/history.py`. Keep new
+non-interactive responsibilities in focused modules rather than growing the
+entry-point script.
+
 ## Conventions
 
 - Scripts should have a usage comment or `--help` flag

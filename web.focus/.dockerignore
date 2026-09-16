@@ -1,0 +1,6 @@
+# Only the page ships in the image.
+README.md
+CLAUDE.md
+deploy-main.sh
+docker-compose.yml
+Dockerfile

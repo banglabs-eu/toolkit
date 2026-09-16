@@ -1,0 +1,9 @@
+# network_mode: host, as every other service on this box runs — the Cloudflare
+# Tunnel reaches it on 127.0.0.1:8016 and nothing is published publicly.
+services:
+  web:
+    build:
+      context: .
+    image: focus-web:${IMAGE_TAG:-latest}
+    network_mode: host
+    restart: unless-stopped
