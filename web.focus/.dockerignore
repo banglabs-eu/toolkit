@@ -1,6 +1,7 @@
-# Only the page ships in the image.
+# Only the page ships in the image. The icons do; what draws them does not.
 README.md
 CLAUDE.md
+make-icons.py
 deploy-main.sh
 docker-compose.yml
 Dockerfile

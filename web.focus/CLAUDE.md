@@ -80,6 +80,14 @@ pattern as `Snippets/ios.snippets`, not another HTML/CSS/JS tree here.
 - **Keys come from an off-screen `<input>`**, not the document, because a
   phone needs a focused field to raise a keyboard. Anything that swallows
   focus breaks every key at once.
+- **iOS will not read an SVG `apple-touch-icon`.** Given one it does not fall
+  back to the `<link rel="icon">` SVG either — it screenshots the page and puts
+  that on the Home Screen, so the installed app shows a picture of the terminal
+  and nothing looks broken enough to report. The icons are therefore PNG, drawn
+  by `make-icons.py` (checked in so they can be regenerated). An app icon
+  cannot animate, so what it carries is one still frame of the `space` scene in
+  that theme's own colours. Keep the art inside the middle: iOS masks the
+  square to a rounded superellipse and shaves the corners.
 - **A file the Dockerfile forgets does not 404** — `try_files $uri $uri/
   /index.html` answers with the page, as `text/html`, status 200. That is how
   `manifest.json` shipped for two days as a perfectly healthy-looking page

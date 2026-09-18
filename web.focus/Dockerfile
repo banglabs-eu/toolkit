@@ -8,6 +8,7 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 # does not 404, it answers with the page as text/html, so a missing manifest
 # looks like a working one until iOS quietly refuses to install it.
 COPY index.html config.js styles.css manifest.json /usr/share/nginx/html/
+COPY icon-180.png icon-192.png icon-512.png /usr/share/nginx/html/
 COPY js/ /usr/share/nginx/html/js/
 
 EXPOSE 8016
