@@ -118,8 +118,8 @@ function defaultTheme() {
 /* --- what it prints before you type anything ---------------------------------- */
 
 function greet(term) {
-  term.write([["focus", BOLD + ACCENT],
-              [" — name a goal, then count 25 minutes down against it.", ""]]);
+  term.write([["Focus", BOLD + ACCENT],
+              [" — name a focus, then count 25 minutes down against it.", ""]]);
   term.write([["Type what the block is for and press enter. Enter on its own gives the", DIM]]);
   term.write([["command line, where --help lists the rest.", DIM]]);
   term.write();
@@ -127,7 +127,7 @@ function greet(term) {
 
 function help(term) {
   const lines = [
-    ["rewrite the intro", "the goal on its own, and 25 minutes against it"],
+    ["rewrite the intro", "the focus on its own, and 25 minutes against it"],
     ["-m 50 deep work", "a different length"],
     ["-t aquarium read", "pick the scene instead of taking pot luck"],
     ["--preview airport", "watch a theme without starting a block"],
@@ -186,7 +186,7 @@ function parseBirthday(text) {
 async function askProfile(term, force = false) {
   const profile = loadProfile();
   if (profile.asked && !force) return profile;
-  term.write("focus can throw you a party on your birthday. Both answers are");
+  term.write("Focus can throw you a party on your birthday. Both answers are");
   term.write("optional — press enter to skip, or type --me to change them later.");
   const name = (await term.readLine("  Your name: ")).trim();
   const born = (await term.readLine("  Your birthday (day-month, e.g. 7-3): ")).trim();
@@ -258,9 +258,9 @@ async function sendLocal(term) {
 async function block(term, plan) {
   let goal = plan.goal.join(" ").trim();
   if (!goal) {
-    goal = (await term.readLine("Goal: ")).trim();
+    goal = (await term.readLine("Focus: ")).trim();
     if (!goal) {
-      term.write([["A block needs a goal. Nothing started.", AMBER]]);
+      term.write([["A block needs a focus. Nothing started.", AMBER]]);
       return 1;
     }
   }
@@ -411,19 +411,19 @@ async function main() {
 
   await askProfile(term);
 
-  // `focus` with no arguments asks for the goal before anything else, and so
+  // `focus` with no arguments asks for the focus before anything else, and so
   // does this: the command line is what enter on its own gives you.
-  const first = (await term.readLine("Goal: ")).trim();
+  const first = (await term.readLine("Focus: ")).trim();
   if (first && !first.startsWith("-")) {
     const plan = parse("");                 // the defaults, as `focus` with no flags
-    plan.goal = [first];                    // the goal prompt takes the line as it is
+    plan.goal = [first];                    // the focus prompt takes the line as it is
     await block(term, plan);
     term.write();
   } else if (first) {
-    await run(term, first);                 // a flag typed at the goal prompt
+    await run(term, first);                 // a flag typed at the focus prompt
     term.write();
   } else {
-    term.write([["A block needs a goal. Nothing started.", AMBER]]);
+    term.write([["A block needs a focus. Nothing started.", AMBER]]);
     term.write();
   }
 

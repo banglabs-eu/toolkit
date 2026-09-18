@@ -25,12 +25,12 @@ refuses.
 
 ## What you can type
 
-The prompt takes the flags the script takes, and the goal is whatever is left
+The prompt takes the flags the script takes, and the focus is whatever is left
 over. `--help` prints the list.
 
 | Typed | What happens |
 |-------|--------------|
-| `rewrite the intro` | 25 minutes against that goal |
+| `rewrite the intro` | 25 minutes against that focus |
 | `-m 50 deep work` | a different length |
 | `-t aquarium read` | pick the scene instead of taking pot luck |
 | `--preview airport` | watch a theme, logging nothing |
@@ -43,9 +43,9 @@ over. `--help` prints the list.
 | `--default-theme matrix` | the same default `d` sets in the picker |
 | `clear` | empty the scrollback |
 
-The page opens on `Goal:`, the way `focus` with no arguments does. Enter on
+The page opens on `Focus:`, the way `focus` with no arguments does. Enter on
 its own gives you the `$ focus` command line instead, and a flag typed at the
-goal prompt is read as one.
+focus prompt is read as one.
 
 While a block runs: `space` pauses, `t` opens the scene picker — the arrow
 keys walk the rota, each scene drawn behind the clock as you reach it, `d`
@@ -53,7 +53,7 @@ keeps the one you are on as the default (green in the strip, `d` again clears
 it), and `t`, `enter` or `escape` goes back to the block — and `q` stops
 early. A block that reaches zero rings, draws six seconds of fireworks,
 a shockwave or confetti, and then asks what comes next — `f` new session, `r`
-the same goal again, `q` quit. Up and down walk back through what you typed.
+the same focus again, `q` quit. Up and down walk back through what you typed.
 
 On a phone the keyboard comes up on a tap, and a tap during a block is the
 space bar. Add it to an iOS or Android home screen (share sheet → *Add to

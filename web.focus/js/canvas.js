@@ -95,7 +95,7 @@ export class Sprite {
 /** The default: an empty stage, nothing behind the clock. */
 export class Theme {
   static themeName = "plain";
-  static blurb = "just the goal, the clock and the bar";
+  static blurb = "just the focus, the clock and the bar";
   static seasonal = false;             // see inSeason: some themes keep to a date
 
   static inSeason() {

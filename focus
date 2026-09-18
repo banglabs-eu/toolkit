@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""focus — name a goal, then count 25 minutes down against it.
+"""Focus — name a focus, then count 25 minutes down against it.
 
 A pomodoro that insists on the first half of the ritual: you say what the
 block is for before the clock starts, and that sentence stays on screen the
-whole time. When the countdown ends it rings, and the session — goal, length,
-whether you saw it through — is appended to a log you can read back.
+whole time. When the countdown ends it rings, and the session — the focus, its
+length, whether you saw it through — is appended to a log you can read back.
 
-    focus                          ask for the goal, then count 25 minutes down
-    focus "rewrite the intro"      goal on the command line, same 25 minutes
+    focus                          ask for the focus, then count 25 minutes down
+    focus "rewrite the intro"      the focus on the command line, same 25 minutes
     focus -m 50 "deep work"        a different length
     focus -t aquarium "read"       pick the scene instead of taking pot luck
     focus --preview airport        watch a theme without starting a block
@@ -22,7 +22,7 @@ whether you saw it through — is appended to a log you can read back.
 Themes draw a scene behind the clock, a frame every tenth of a second. Each
 block takes a random one unless -t or $FOCUS_THEME says otherwise:
 
-    plain      nothing but the goal, the clock and the bar
+    plain      nothing but the focus, the clock and the bar
     aquarium   fish crossing the tank, seaweed swaying on the floor,
                bubbles rising, and once in a while a crab or a squid
     airport    a terminal and tower along the bottom, departures rolling
@@ -50,7 +50,7 @@ block takes a random one unless -t or $FOCUS_THEME says otherwise:
 The last four keep to their dates. Random offers the haunted house only in the
 Monday-to-Sunday week that holds 31 October, Christmas through December, and
 Easter from Palm Sunday to Easter Monday — Easter moves, so it is computed.
-Your birthday outranks the lot: on the day, random draws nothing else. focus
+Your birthday outranks the lot: on the day, random draws nothing else. Focus
 asks for your name and birthday once, keeps them in ~/focus/profile.json, and
 --me changes them. -t names any of these any day of the year.
 
@@ -76,12 +76,12 @@ glyphclock.bang-labs.eu.
 A block that runs to zero ends on six seconds of celebration — fireworks, a
 shockwave or confetti, drawn at random over the theme, with DONE across the
 middle. Any key closes it early, --no-finale skips it. Closing it asks what
-comes next: f starts a new session, r runs the same goal again, q quits.
+comes next: f starts a new session, r runs the same focus again, q quits.
 
 Everything lands in ~/focus/sessions.csv, on this machine and nowhere else.
 Run --login once and the record moves to your Bang Labs account instead — the
 same one every bang-labs.eu site uses — so a block started on the laptop is
-there in --history on the desktop. Signed out, focus never touches the
+there in --history on the desktop. Signed out, Focus never touches the
 network; --logout goes back to the CSV. A block that cannot be uploaded when
 it ends waits in ~/focus/pending.jsonl and goes up with the next one, so
 nothing is lost to a dropped connection.
@@ -384,7 +384,7 @@ class Theme:
     """The default: an empty stage, nothing behind the clock."""
 
     name = "plain"
-    blurb = "just the goal, the clock and the bar"
+    blurb = "just the focus, the clock and the bar"
     seasonal = False                   # see in_season: some themes keep to a date
 
     @staticmethod
@@ -1742,7 +1742,7 @@ class Easter(Theme):
 
 class Birthday(Theme):
     name = "birthday"
-    blurb = "cake, candles and balloons — on your birthday, once focus knows it"
+    blurb = "cake, candles and balloons — on your birthday, once Focus knows it"
     seasonal = True
 
     BUNTING = [rgb(240, 110, 120), rgb(250, 205, 90), rgb(120, 200, 235),
@@ -2007,7 +2007,7 @@ THEMES = {theme.name: theme for theme in (Theme, Aquarium, Airport, Space, Galax
 
 def compose(canvas, goal, remaining, total, paused, started_at, choosing=None,
             default=None):
-    """The goal, the clock, the bar and the hint, centred over whatever scene."""
+    """The focus, the clock, the bar and the hint, centred over whatever scene."""
     cols, rows = canvas.cols, canvas.rows
     tint = AMBER if paused or remaining <= 60 else ACCENT
 
@@ -2271,7 +2271,7 @@ def alarm(goal, minutes):
     message = "%g minutes done — %s" % (minutes, goal)
     if shutil.which("notify-send"):
         subprocess.run(
-            ["notify-send", "--urgency=critical", "--app-name=focus", "focus", message],
+            ["notify-send", "--urgency=critical", "--app-name=Focus", "Focus", message],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -2312,7 +2312,7 @@ def one_key(allowed):
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
 
 
-def ask_goal(prompt="Goal: "):
+def ask_goal(prompt="Focus: "):
     try:
         return input(prompt).strip()
     except (EOFError, KeyboardInterrupt):
@@ -2321,9 +2321,9 @@ def ask_goal(prompt="Goal: "):
 
 
 def again(goal, minutes, colour):
-    """What follows a block that landed: a new goal, the same one, or nothing.
+    """What follows a block that landed: a new focus, the same one, or nothing.
 
-    Returns the goal of the next block, or None to stop here.
+    Returns the focus of the next block, or None to stop here.
     """
     short = goal if len(goal) <= 40 else goal[:39] + "…"
     print()
@@ -2336,7 +2336,7 @@ def again(goal, minutes, colour):
     if choice == "r":
         print("  Again: %s — %g minutes" % (goal, minutes))
         return goal
-    return ask_goal("  New goal (%g min): " % minutes) or None
+    return ask_goal("  New focus (%g min): " % minutes) or None
 
 
 def load_profile():
@@ -2407,7 +2407,7 @@ def ask_profile(force=False):
     profile = load_profile()
     if (profile.get("asked") and not force) or not sys.stdin.isatty():
         return profile
-    print("focus can throw you a party on your birthday. Both answers are")
+    print("Focus can throw you a party on your birthday. Both answers are")
     print("optional — press enter to skip, or run focus --me to change them later.")
     try:
         name = input("  Your name: ").strip()
@@ -2536,7 +2536,7 @@ def main():
     default_theme = default_scene()
     parser = argparse.ArgumentParser(
         prog="focus",
-        description="Name a goal, then count %d minutes down against it." % DEFAULT_MINUTES,
+        description="Name a focus, then count %d minutes down against it." % DEFAULT_MINUTES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="themes:\n  " + "\n  ".join(
             ["%-9s %s" % (name, theme.blurb) for name, theme in THEMES.items()]
@@ -2545,11 +2545,14 @@ def main():
           "walk it, d keeps one as the default, t, enter or escape leave it.\n"
           "A finished block\n"
           "asks what comes next:\n"
-          "f starts a new session, r runs the same goal again, q quits.\n"
+          "f starts a new session, r runs the same focus again, q quits.\n"
           "Sessions are logged to " + LOG_FILE
           + ",\nor to your Bang Labs account once you have run focus --login.",
     )
-    parser.add_argument("goal", nargs="*", help="what this block is for")
+    # dest stays `goal`: it is the name of the logged field and of every
+    # variable downstream. Only the label in --help is the user's word for it.
+    parser.add_argument("goal", metavar="focus", nargs="*",
+                        help="what this block is for")
     parser.add_argument("-m", "--minutes", type=float, default=DEFAULT_MINUTES,
                         help="length of the countdown (default: %d)" % DEFAULT_MINUTES)
     parser.add_argument("-t", "--theme", choices=sorted(THEMES) + [RANDOM],
@@ -2560,7 +2563,7 @@ def main():
                         choices=sorted(THEMES) + [RANDOM], nargs="?", const=default_theme,
                         help="watch a theme run, logging nothing; q to leave")
     parser.add_argument("--me", action="store_true",
-                        help="set the name and birthday focus greets you by")
+                        help="set the name and birthday Focus greets you by")
     parser.add_argument("--login", action="store_true",
                         help="sign in, so the history follows you between machines")
     parser.add_argument("--logout", action="store_true",

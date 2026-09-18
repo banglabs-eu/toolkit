@@ -42,7 +42,7 @@ function alarm(goal, minutes) {
   const message = `${number(minutes)} minutes done — ${goal}`;
   try {
     if (window.Notification && Notification.permission === "granted") {
-      new Notification("focus", { body: message, tag: "focus" });
+      new Notification("Focus", { body: message, tag: "focus" });
     }
   } catch (error) {
     /* notifications are a nicety */
@@ -216,9 +216,9 @@ export async function countdown(term, goal, minutes, themeName,
   return completed ? 0 : 1;
 }
 
-/** What follows a block that landed: a new goal, the same one, or nothing.
+/** What follows a block that landed: a new focus, the same one, or nothing.
  *
- * Returns the goal of the next block, or null to stop here.
+ * Returns the focus of the next block, or null to stop here.
  */
 export async function again(term, goal, minutes) {
   const short = goal.length <= 40 ? goal : goal.slice(0, 39) + "…";
@@ -231,6 +231,6 @@ export async function again(term, goal, minutes) {
     term.write(`  Again: ${goal} — ${number(minutes)} minutes`);
     return goal;
   }
-  const next = await term.readLine(`  New goal (${number(minutes)} min): `);
+  const next = await term.readLine(`  New focus (${number(minutes)} min): `);
   return next.trim() || null;
 }

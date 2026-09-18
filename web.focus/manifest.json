@@ -1,7 +1,7 @@
 {
-  "name": "focus",
-  "short_name": "focus",
-  "description": "Name a goal, then count 25 minutes down against it.",
+  "name": "Focus",
+  "short_name": "Focus",
+  "description": "Name a focus, then count 25 minutes down against it.",
   "start_url": "./index.html",
   "display": "standalone",
   "orientation": "any",

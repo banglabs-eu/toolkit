@@ -30,7 +30,7 @@ Three places Python and JavaScript disagree, all handled in `js/util.js`:
 - `int()` truncates towards zero, `Math.floor` does not. `trunc()` is the
   Python one; `Canvas.put` floors deliberately, and says so.
 - String length counts UTF-16 units. `width()`, `cut()` and `chars()` count
-  characters, so an emoji in a goal stays one cell.
+  characters, so an emoji in a focus stays one cell.
 
 ## There is no separate iOS port
 

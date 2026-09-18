@@ -376,8 +376,8 @@ Needs `ffmpeg` and `python3-numpy`. No root, no GUI toolkit.
 A pomodoro that insists on the first half of the ritual: name what the block is for, and that sentence stays on screen beside the clock for the whole 25 minutes.
 
 ```bash
-focus                          # asks for the goal, then counts 25 minutes down
-focus "rewrite the intro"      # goal on the command line, same 25 minutes
+focus                          # asks for the focus, then counts 25 minutes down
+focus "rewrite the intro"      # the focus on the command line, same 25 minutes
 focus -m 50 "deep work"        # a different length
 focus -t aquarium "read"       # run the block inside an aquarium
 focus -t matrix "refactor"     # pick one instead of taking pot luck
@@ -439,7 +439,7 @@ it. Any key closes it early; `--no-finale` skips it for good.
 ```
 
 Closing it leaves three keys under the ✓ line: `f` starts a new session, which
-asks for the next goal and keeps the same length; `r` runs the same goal again;
+asks for the next focus and keeps the same length; `r` runs the same focus again;
 `q` gives the terminal back. One block can become an afternoon without typing
 the command again. A block you stop early ends there, as before, and so does one
 run with `--no-finale`.
@@ -547,7 +547,7 @@ is stored; the `birthday` theme then simply never comes up on its own.
 
 | Theme | What moves |
 |-------|-----------|
-| `plain` | nothing — the default: goal, clock, bar |
+| `plain` | nothing — the default: focus, clock, bar |
 | `aquarium` | fish crossing the tank, seaweed swaying, bubbles rising, a volcano venting on the floor that erupts every couple of minutes, a crab or a squid now and then, and exactly one blue whale per block |
 | `airport` | terminal and control tower along the bottom, departures rolling out and climbing away, arrivals descending onto the runway, helicopters settling on the apron and lifting off again, tugs, clouds |
 | `space` | a twinkling starfield past a ringed planet, rockets under power, satellites blinking, the odd comet |
@@ -644,7 +644,7 @@ airport drops its tower and terminal building rather than overflow.
 
 #### The log
 
-Every session — goal, planned length, how long it actually ran, whether it
+Every session — the focus, planned length, how long it actually ran, whether it
 finished — is appended to `~/focus/sessions.csv`, which is what `--log` prints:
 
 ```

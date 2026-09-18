@@ -17,7 +17,7 @@ export const FINALES = ["fireworks", "shockwave", "confetti"];
 export const SPARKS = [rgb(255, 215, 95), rgb(255, 125, 90), rgb(120, 220, 255),
                        rgb(195, 145, 255), rgb(140, 250, 150), rgb(255, 255, 255)];
 
-/** The goal, the clock, the bar and the hint, centred over whatever scene. */
+/** The focus, the clock, the bar and the hint, centred over whatever scene. */
 export function compose(canvas, goal, remaining, total, paused, startedAt,
                         choosing = null, standing = null) {
   const cols = canvas.cols, rows = canvas.rows;

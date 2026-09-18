@@ -171,7 +171,7 @@ export async function showHistory(term, when, cols) {
   try {
     const rows = await readLog({ since: start, until: end });
     if (!rows.length && !(await summary())[2]) {
-      term.write("No sessions yet. Type a goal and press enter.");
+      term.write("No sessions yet. Type a focus and press enter.");
       return 0;
     }
 
@@ -218,7 +218,7 @@ export async function showLog(term, limit) {
     return 1;
   }
   if (!rows.length) {
-    term.write("No sessions yet. Type a goal and press enter.");
+    term.write("No sessions yet. Type a focus and press enter.");
     return 0;
   }
 

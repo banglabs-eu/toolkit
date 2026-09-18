@@ -73,7 +73,7 @@ export function range(a, b, step = 1) {
 
 /* --- text ------------------------------------------------------------------ */
 
-/** Characters, not UTF-16 units, so an emoji in a goal stays one cell. */
+/** Characters, not UTF-16 units, so an emoji in a focus stays one cell. */
 export function chars(text) {
   return Array.from(text);
 }

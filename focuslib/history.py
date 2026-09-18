@@ -244,7 +244,7 @@ def show_history(when):
     try:
         rows = read_log(since=start, until=end)
         if not rows and not summary()[2]:
-            print("No sessions yet. Run: focus \"your goal\"")
+            print("No sessions yet. Run: focus \"your focus\"")
             return 0
 
         if a_week:
@@ -281,7 +281,7 @@ def show_log(limit):
         print(error, file=sys.stderr)
         return 1
     if not rows:
-        print("No sessions yet. Run: focus \"your goal\"")
+        print("No sessions yet. Run: focus \"your focus\"")
         return 0
 
     print("Today %d min · last 7 days %d min · %d sessions logged\n"

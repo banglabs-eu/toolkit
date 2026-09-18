@@ -1699,7 +1699,7 @@ export class Easter extends Theme {
 
 export class Birthday extends Theme {
   static themeName = "birthday";
-  static blurb = "cake, candles and balloons \u2014 on your birthday, once focus knows it";
+  static blurb = "cake, candles and balloons \u2014 on your birthday, once Focus knows it";
   static seasonal = true;
 
   static inSeason(day = today()) {
