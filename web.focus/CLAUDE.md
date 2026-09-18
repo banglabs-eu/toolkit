@@ -80,6 +80,12 @@ pattern as `Snippets/ios.snippets`, not another HTML/CSS/JS tree here.
 - **Keys come from an off-screen `<input>`**, not the document, because a
   phone needs a focused field to raise a keyboard. Anything that swallows
   focus breaks every key at once.
+- **A file the Dockerfile forgets does not 404** — `try_files $uri $uri/
+  /index.html` answers with the page, as `text/html`, status 200. That is how
+  `manifest.json` shipped for two days as a perfectly healthy-looking page
+  that iOS silently declined to install. Anything `index.html` names has to be
+  on a `COPY` line; `curl -I` a fresh deploy and read the *content type*, not
+  the status.
 
 ## Testing
 

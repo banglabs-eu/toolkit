@@ -3,7 +3,11 @@
 FROM nginx:alpine
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY index.html config.js styles.css /usr/share/nginx/html/
+# Everything index.html asks for by name. manifest.json belongs here and not
+# in .dockerignore's company: `try_files … /index.html` means a file left out
+# does not 404, it answers with the page as text/html, so a missing manifest
+# looks like a working one until iOS quietly refuses to install it.
+COPY index.html config.js styles.css manifest.json /usr/share/nginx/html/
 COPY js/ /usr/share/nginx/html/js/
 
 EXPOSE 8016
