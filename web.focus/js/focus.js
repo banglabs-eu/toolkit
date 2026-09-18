@@ -64,7 +64,14 @@ export function mayNotify() {
 
 /* --- the six seconds after a block lands -------------------------------------- */
 
-/** Run the finish animation until it is done or a key says enough. */
+/** Run the finish animation until it is done or a key says enough.
+ *
+ * Paced at FRAME, exactly as the block itself is and as the script's
+ * `select(…, FRAME)` is: an animation frame on a phone is 60 or 120 a second,
+ * and repainting the whole screen that often is six to twelve times the work
+ * the block was doing a moment earlier — at the one moment the finale is also
+ * the busiest thing on the canvas.
+ */
 function celebrate(term, theme, goal, minutes) {
   const show = new Finale(choice(FINALES));
   const start = ticking();
@@ -78,6 +85,7 @@ function celebrate(term, theme, goal, minutes) {
       resolve();
     };
     term.onkey = finish;
+    let painted = 0;
     const paint = () => {
       if (done) return;
       const now = ticking();
@@ -87,11 +95,17 @@ function celebrate(term, theme, goal, minutes) {
         rung++;
         bell();
       }
-      const canvas = new Canvas(term.cols, term.rows);
-      theme.draw(canvas, now);
-      show.draw(canvas, now, elapsed);
-      banner(canvas, goal, minutes, now);
-      term.frame(canvas);
+      // The whole frame is gated, not just the write: a theme and the finale
+      // both step on their own dt, so drawing between paints would run the
+      // particles at the screen's rate and paint every sixth position of them.
+      if (now - painted >= FRAME) {
+        painted = now;
+        const canvas = new Canvas(term.cols, term.rows);
+        theme.draw(canvas, now);
+        show.draw(canvas, now, elapsed);
+        banner(canvas, goal, minutes, now);
+        term.frame(canvas);
+      }
       requestAnimationFrame(paint);
     };
     paint();

@@ -77,6 +77,15 @@ pattern as `Snippets/ios.snippets`, not another HTML/CSS/JS tree here.
 - **The alternate screen is repainted whole, ten times a second.** Keep
   `frame()` cheap: build one string, set `innerHTML` once. Per-cell elements
   will not hold up on a maximised window.
+- **Ten times a second means gated on `FRAME`, not on `requestAnimationFrame`.**
+  An animation frame is 60 a second on a phone and 120 on a ProMotion iPhone,
+  so a loop that paints every frame is six to twelve times the work — a full
+  `innerHTML` replacement of a grid that is 57×60 cells in standalone mode.
+  `celebrate()` did exactly that until 2026-09-18, which is why the page fell
+  over at the moment a block landed and nowhere else. Gate the **whole** frame,
+  the way `countdown()` does: a theme and the `Finale` both step on their own
+  `dt`, so drawing between paints runs the particles at the screen's rate and
+  shows every sixth position of them.
 - **Keys come from an off-screen `<input>`**, not the document, because a
   phone needs a focused field to raise a keyboard. Anything that swallows
   focus breaks every key at once.
